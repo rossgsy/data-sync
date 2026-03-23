@@ -121,8 +121,9 @@ impl AppState {
         Ok(())
     }
 
-    pub fn del_fragment(&mut self, room_id: u64, container: String, key: String) -> Result<(), StateError> {
-        let room = self.rooms.get_mut(&room_id).ok_or(StateError::RoomNotFound)?;
+    pub fn del_fragment(&self, room_id: u64, container: String, key: String) -> Result<(), StateError> {
+        let room_arc = self.rooms.get(&room_id).ok_or(StateError::RoomNotFound)?;
+        let mut room = room_arc.write().map_err(|_| StateError::RoomNotFound)?;
 
         if let Some(buffer) = room.tx_buffer.as_mut() {
             buffer.push(RoomCommand::Del { container, key });
@@ -139,19 +140,21 @@ impl AppState {
         Ok(())
     }
 
-    pub fn get_fragment(&self, room_id: u64, container: &str, key: &str) -> Result<(&Value, u64), StateError> {
-        let room = self.rooms.get(&room_id).ok_or(StateError::RoomNotFound)?;
+    pub fn get_fragment(&self, room_id: u64, container: &str, key: &str) -> Result<(Value, u64), StateError> {
+        let room_arc = self.rooms.get(&room_id).ok_or(StateError::RoomNotFound)?;
+        let room = room_arc.read().map_err(|_| StateError::RoomNotFound)?;
         let container_map = room
             .containers
             .get(container)
             .ok_or(StateError::ContainerNotFound)?;
         let fragment = container_map.get(key).ok_or(StateError::FragmentNotFound)?;
 
-        Ok((&fragment.value, fragment.key_version))
+        Ok((fragment.value.clone(), fragment.key_version))
     }
 
     pub fn room_version(&self, room_id: u64) -> Result<u64, StateError> {
-        let room = self.rooms.get(&room_id).ok_or(StateError::RoomNotFound)?;
+        let room_arc = self.rooms.get(&room_id).ok_or(StateError::RoomNotFound)?;
+        let room = room_arc.read().map_err(|_| StateError::RoomNotFound)?;
         Ok(room.room_counter)
     }
 
@@ -201,8 +204,9 @@ impl AppState {
             .map_err(|_| StateError::JwtKeyNotConfigured)
     }
 
-    pub fn tx_begin(&mut self, room_id: u64) -> Result<(), StateError> {
-        let room = self.rooms.get_mut(&room_id).ok_or(StateError::RoomNotFound)?;
+    pub fn tx_begin(&self, room_id: u64) -> Result<(), StateError> {
+        let room_arc = self.rooms.get(&room_id).ok_or(StateError::RoomNotFound)?;
+        let mut room = room_arc.write().map_err(|_| StateError::RoomNotFound)?;
         if room.tx_buffer.is_some() {
             return Err(StateError::TxAlreadyOpen);
         }
@@ -210,8 +214,9 @@ impl AppState {
         Ok(())
     }
 
-    pub fn tx_end(&mut self, room_id: u64) -> Result<(), StateError> {
-        let room = self.rooms.get_mut(&room_id).ok_or(StateError::RoomNotFound)?;
+    pub fn tx_end(&self, room_id: u64) -> Result<(), StateError> {
+        let room_arc = self.rooms.get(&room_id).ok_or(StateError::RoomNotFound)?;
+        let mut room = room_arc.write().map_err(|_| StateError::RoomNotFound)?;
         let mut buffer = room.tx_buffer.take().ok_or(StateError::TxNotOpen)?;
 
         for op in buffer.drain(..) {
