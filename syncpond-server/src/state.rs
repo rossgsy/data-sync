@@ -61,6 +61,7 @@ pub struct AppState {
     pub jwt_ttl_seconds: u64,
     pub jwt_issuer: Option<String>,
     pub jwt_audience: Option<String>,
+    pub last_jwt_issue_seconds: Option<u64>,
     pub command_api_key: Option<String>,
 }
 
@@ -74,6 +75,7 @@ impl AppState {
             jwt_ttl_seconds: 3600,
             jwt_issuer: None,
             jwt_audience: None,
+            last_jwt_issue_seconds: None,
             command_api_key: None,
         }
     }
@@ -244,11 +246,18 @@ impl AppState {
         let mut container_set: HashSet<String> = containers.iter().cloned().collect();
         container_set.insert("public".to_string());
 
-        let exp = SystemTime::now()
+        let now = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap_or_default()
-            .as_secs()
-            + self.jwt_ttl_seconds;
+            .as_secs();
+
+        let now = if let Some(last) = self.last_jwt_issue_seconds {
+            std::cmp::max(now, last.saturating_add(1))
+        } else {
+            now
+        };
+
+        let exp = now.saturating_add(self.jwt_ttl_seconds);
 
         #[derive(Debug, Serialize, Deserialize)]
         struct JwtClaims {

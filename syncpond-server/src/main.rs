@@ -28,6 +28,8 @@ struct SyncpondConfig {
     jwt_issuer: Option<String>,
     jwt_audience: Option<String>,
     jwt_ttl_seconds: Option<u64>,
+    require_tls: Option<bool>,
+    health_bind_loopback_only: Option<bool>,
 }
 
 #[tokio::main]
@@ -62,9 +64,15 @@ async fn main() -> Result<()> {
         anyhow::bail!("command_api_key must be configured and non-empty");
     }
 
+    let require_tls = config.require_tls.unwrap_or(false);
+    if require_tls {
+        anyhow::bail!("TLS transport required in config, but this binary does not terminate TLS; use reverse proxy for TLS termination");
+    }
+
     let ws_addr = config.ws_addr.unwrap_or_else(|| "127.0.0.1:8080".to_string());
     let command_addr = config.command_addr.unwrap_or_else(|| "127.0.0.1:9090".to_string());
     let health_addr = config.health_addr.unwrap_or_else(|| "127.0.0.1:7070".to_string());
+    let health_bind_loopback_only = config.health_bind_loopback_only.unwrap_or(true);
 
     let ws_addr: SocketAddr = ws_addr
         .parse()
@@ -72,6 +80,13 @@ async fn main() -> Result<()> {
     let command_addr: SocketAddr = command_addr
         .parse()
         .with_context(|| format!("invalid command_addr: {}", command_addr))?;
+    let health_addr: SocketAddr = health_addr
+        .parse()
+        .with_context(|| format!("invalid health_addr: {}", health_addr))?;
+
+    if health_bind_loopback_only && !health_addr.ip().is_loopback() {
+        anyhow::bail!("health_bind_loopback_only=true but health_addr is not loopback");
+    }
 
     let ws_state = shared_state.clone();
     let ws_hub_for_ws = ws_hub.clone();
@@ -133,6 +148,11 @@ async fn main() -> Result<()> {
             let (stream, peer) = listener.accept().await?;
             let state = health_state.clone();
             tokio::spawn(async move {
+                if health_bind_loopback_only && !peer.ip().is_loopback() {
+                    error!(%peer, "rejected non-loopback health connection");
+                    return;
+                }
+
                 if let Err(err) = handle_health_connection(stream, state).await {
                     error!(%err, peer = %peer, "health connection error");
                 }
@@ -160,13 +180,32 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn handle_health_connection(stream: TcpStream, state: SharedState) -> Result<()> {
+const MAX_COMMAND_LINE_LEN: usize = 8192;
+const CMD_RATE_LIMIT: usize = 120;
+const CMD_RATE_WINDOW_SECS: u64 = 60;
+
+async fn read_line_with_limit<R>(reader: &mut BufReader<R>, line: &mut String) -> Result<usize>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    line.clear();
+    let bytes = reader.read_line(line).await?;
+    if line.len() > MAX_COMMAND_LINE_LEN {
+        anyhow::bail!("line_too_long");
+    }
+    Ok(bytes)
+}
+
+async fn handle_health_connection(
+    stream: TcpStream,
+    state: SharedState,
+) -> Result<()> {
     let (reader, writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
     let mut writer = BufWriter::new(writer);
     let mut line = String::new();
 
-    let bytes = reader.read_line(&mut line).await?;
+    let bytes = read_line_with_limit(&mut reader, &mut line).await?;
     if bytes == 0 {
         return Ok(());
     }
@@ -197,9 +236,6 @@ async fn handle_health_connection(stream: TcpStream, state: SharedState) -> Resu
     Ok(())
 }
 
-const CMD_RATE_LIMIT: usize = 120;
-const CMD_RATE_WINDOW_SECS: u64 = 60;
-
 async fn handle_command_connection(
     stream: TcpStream,
     peer: SocketAddr,
@@ -225,7 +261,7 @@ async fn handle_command_connection(
 
     // first message must be API key
     line.clear();
-    let first_bytes = reader.read_line(&mut line).await?;
+    let first_bytes = read_line_with_limit(&mut reader, &mut line).await?;
     if first_bytes == 0 {
         return Ok(());
     }
@@ -250,7 +286,15 @@ async fn handle_command_connection(
 
     loop {
         line.clear();
-        let bytes = reader.read_line(&mut line).await?;
+        let bytes = match read_line_with_limit(&mut reader, &mut line).await {
+            Ok(n) => n,
+            Err(err) => {
+                let msg = format!("ERROR {}\n", err);
+                writer.write_all(msg.as_bytes()).await?;
+                writer.flush().await?;
+                return Ok(());
+            }
+        };
         if bytes == 0 {
             break;
         }
