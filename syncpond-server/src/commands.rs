@@ -174,6 +174,26 @@ pub async fn process_command(line: &str, state: &SharedState) -> (String, Vec<Ro
                 Err(e) => (error_of(e), vec![]),
             }
         }
+        "TOKEN.GEN" => {
+            let mut tokens = line.split_whitespace();
+            let _ = tokens.next(); // skip command
+            let room_id_str = match tokens.next() {
+                Some(v) => v,
+                None => return ("ERROR invalid_room_id".into(), vec![]),
+            };
+            let room_id = match room_id_str.parse::<u64>() {
+                Ok(id) => id,
+                Err(_) => return ("ERROR invalid_room_id".into(), vec![]),
+            };
+
+            let containers: Vec<String> = tokens.map(String::from).collect();
+
+            let app = state.read().await;
+            match app.create_room_token(room_id, &containers) {
+                Ok(token) => (format!("OK {}", token), vec![]),
+                Err(e) => (error_of(e), vec![]),
+            }
+        }
         _ => ("ERROR unknown_command".into(), vec![]),
     }
 }

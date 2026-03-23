@@ -1,5 +1,7 @@
+use jsonwebtoken::{encode, EncodingKey, Header};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::{HashMap, HashSet}, sync::Arc, time::SystemTime};
 use tokio::sync::RwLock;
 
 #[derive(Debug)]
@@ -28,6 +30,7 @@ pub enum StateError {
     FragmentNotFound,
     TxNotOpen,
     TxAlreadyOpen,
+    JwtKeyNotConfigured,
 }
 
 impl std::fmt::Display for StateError {
@@ -38,6 +41,7 @@ impl std::fmt::Display for StateError {
             StateError::FragmentNotFound => write!(f, "not_found"),
             StateError::TxNotOpen => write!(f, "tx_not_open"),
             StateError::TxAlreadyOpen => write!(f, "tx_already_open"),
+            StateError::JwtKeyNotConfigured => write!(f, "jwt_key_not_configured"),
         }
     }
 }
@@ -52,6 +56,7 @@ pub struct AppState {
     pub rooms: HashMap<u64, RoomState>,
     pub next_room_id: u64,
     pub jwt_key: Option<String>,
+    pub jwt_ttl_seconds: u64,
     pub command_api_key: Option<String>,
 }
 
@@ -62,6 +67,7 @@ impl AppState {
             rooms: HashMap::new(),
             next_room_id: 1,
             jwt_key: None,
+            jwt_ttl_seconds: 3600,
             command_api_key: None,
         }
     }
@@ -153,8 +159,46 @@ impl AppState {
         self.jwt_key = Some(key);
     }
 
+    pub fn set_jwt_ttl(&mut self, seconds: u64) {
+        self.jwt_ttl_seconds = seconds;
+    }
+
     pub fn set_command_api_key(&mut self, key: String) {
         self.command_api_key = Some(key);
+    }
+
+    pub fn create_room_token(&self, room_id: u64, containers: &[String]) -> Result<String, StateError> {
+        let key = self.jwt_key.as_ref().ok_or(StateError::JwtKeyNotConfigured)?;
+        if !self.rooms.contains_key(&room_id) {
+            return Err(StateError::RoomNotFound);
+        }
+
+        let mut container_set: HashSet<String> = containers.iter().cloned().collect();
+        container_set.insert("public".to_string());
+
+        let exp = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+            + self.jwt_ttl_seconds;
+
+        #[derive(Debug, Serialize, Deserialize)]
+        struct JwtClaims {
+            sub: String,
+            room: String,
+            containers: Vec<String>,
+            exp: usize,
+        }
+
+        let claims = JwtClaims {
+            sub: format!("room:{}", room_id),
+            room: room_id.to_string(),
+            containers: container_set.into_iter().collect(),
+            exp: exp as usize,
+        };
+
+        encode(&Header::default(), &claims, &EncodingKey::from_secret(key.as_bytes()))
+            .map_err(|_| StateError::JwtKeyNotConfigured)
     }
 
     pub fn tx_begin(&mut self, room_id: u64) -> Result<(), StateError> {

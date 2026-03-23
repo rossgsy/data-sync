@@ -22,6 +22,7 @@ struct SyncpondConfig {
     ws_addr: Option<String>,
     command_addr: Option<String>,
     jwt_key: Option<String>,
+    jwt_ttl_seconds: Option<u64>,
 }
 
 #[tokio::main]
@@ -36,6 +37,9 @@ async fn main() -> Result<()> {
     base_state.set_command_api_key(config.command_api_key.clone());
     if let Some(jwt) = config.jwt_key.clone() {
         base_state.set_jwt_key(jwt);
+    }
+    if let Some(ttl) = config.jwt_ttl_seconds {
+        base_state.set_jwt_ttl(ttl);
     }
 
     let shared_state = Arc::new(RwLock::new(base_state));

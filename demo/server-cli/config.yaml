@@ -1,0 +1,4 @@
+command_api_key: "fake-api-key-123456"
+ws_addr: 127.0.0.1:8080
+command_addr: 127.0.0.1:9090
+jwt_key: null
