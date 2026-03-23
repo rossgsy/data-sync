@@ -19,6 +19,9 @@ use tracing::{error, info};
 #[derive(Debug, Deserialize)]
 struct SyncpondConfig {
     command_api_key: String,
+    ws_addr: Option<String>,
+    command_addr: Option<String>,
+    jwt_key: Option<String>,
 }
 
 #[tokio::main]
@@ -30,19 +33,28 @@ async fn main() -> Result<()> {
     let config: SyncpondConfig = serde_yaml::from_str(&config_text)?;
 
     let mut base_state = AppState::new();
-    base_state.set_command_api_key(config.command_api_key);
+    base_state.set_command_api_key(config.command_api_key.clone());
+    if let Some(jwt) = config.jwt_key.clone() {
+        base_state.set_jwt_key(jwt);
+    }
 
     let shared_state = Arc::new(RwLock::new(base_state));
     let ws_hub = Arc::new(Mutex::new(WsHub::new()));
+
+    let ws_addr = config.ws_addr.unwrap_or_else(|| "127.0.0.1:8080".to_string());
+    let command_addr = config.command_addr.unwrap_or_else(|| "127.0.0.1:9090".to_string());
 
     let ws_state = shared_state.clone();
     let ws_hub_for_ws = ws_hub.clone();
     let command_state = shared_state.clone();
     let ws_hub_for_cmd = ws_hub.clone();
 
+    let ws_addr_for_task = ws_addr.clone();
+    let command_addr_for_task = command_addr.clone();
+
     let ws_server = tokio::spawn(async move {
-        let listener = TcpListener::bind("127.0.0.1:8080").await.expect("ws bind");
-        info!("syncpond websocket server listening on 127.0.0.1:8080");
+        let listener = TcpListener::bind(&ws_addr_for_task).await.expect("ws bind");
+        info!("syncpond websocket server listening on {}", ws_addr_for_task);
 
         while let Ok((stream, peer)) = listener.accept().await {
             let state = ws_state.clone();
@@ -56,8 +68,8 @@ async fn main() -> Result<()> {
     });
 
     let command_server = tokio::spawn(async move {
-        let listener = TcpListener::bind("127.0.0.1:9090").await.expect("cmd bind");
-        info!("syncpond command socket listening on 127.0.0.1:9090");
+        let listener = TcpListener::bind(&command_addr_for_task).await.expect("cmd bind");
+        info!("syncpond command socket listening on {}", command_addr_for_task);
 
         while let Ok((stream, peer)) = listener.accept().await {
             let state = command_state.clone();
