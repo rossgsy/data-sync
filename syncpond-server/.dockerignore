@@ -4,4 +4,5 @@ target
 **/.git
 **/.idea
 **/.vscode
-Cargo.lock
+# Cargo.lock is needed for reproducible builds in Docker
+#Cargo.lock
