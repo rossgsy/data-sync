@@ -138,13 +138,20 @@ impl AppState {
             return Ok(());
         }
 
-        let container_map = room
-            .containers
-            .get_mut(&container)
-            .ok_or(StateError::ContainerNotFound)?;
+        if !room.containers.contains_key(&container) {
+            return Err(StateError::ContainerNotFound);
+        }
 
-        container_map.remove(&key);
         room.room_counter += 1;
+        let key_version = room.room_counter;
+        let container_map = room.containers.get_mut(&container).unwrap();
+        container_map.insert(
+            key,
+            FragmentEntry {
+                value: Value::Null,
+                key_version,
+            },
+        );
         Ok(())
     }
 
@@ -296,10 +303,22 @@ impl AppState {
                     );
                 }
                 RoomCommand::Del { container, key } => {
-                    if let Some(container_map) = room.containers.get_mut(&container) {
-                        if container_map.remove(&key).is_some() {
-                            room.room_counter += 1;
-                        }
+                    let should_tombstone = room
+                        .containers
+                        .get(&container)
+                        .map_or(false, |container_map| container_map.contains_key(&key));
+
+                    if should_tombstone {
+                        room.room_counter += 1;
+                        let key_version = room.room_counter;
+                        let container_map = room.containers.get_mut(&container).unwrap();
+                        container_map.insert(
+                            key,
+                            FragmentEntry {
+                                value: Value::Null,
+                                key_version,
+                            },
+                        );
                     }
                 }
             }
@@ -400,7 +419,9 @@ mod tests {
         app.del_fragment(room_id, "public".into(), "foo".into()).unwrap();
         assert_eq!(app.room_version(room_id).unwrap(), 2);
 
-        assert!(matches!(app.get_fragment(room_id, "public", "foo"), Err(StateError::FragmentNotFound)));
+        let (value, kv) = app.get_fragment(room_id, "public", "foo").unwrap();
+        assert_eq!(value, json!(null));
+        assert_eq!(kv, 2);
     }
 
     #[test]

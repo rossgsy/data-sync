@@ -119,7 +119,7 @@ pub async fn process_command(line: &str, state: &SharedState) -> (String, Vec<Ro
                             room_id,
                             container,
                             key,
-                            value: None,
+                            value: Some(serde_json::Value::Null),
                             room_counter,
                         }],
                     )
@@ -302,7 +302,7 @@ mod tests {
         assert_eq!(updates.len(), 1);
 
         let (resp, _) = process_command("GET 1 public foo", &state).await;
-        assert_eq!(resp, "ERROR not_found");
+        assert!(resp.starts_with("OK null"));
     }
 
     #[tokio::test]
