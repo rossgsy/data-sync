@@ -1,28 +1,44 @@
 mod commands;
 mod state;
+mod ws;
 
-use crate::commands::process_command;
+use crate::commands::{process_command, RoomUpdate};
 use crate::state::{AppState, SharedState};
+use crate::ws::{handle_ws_connection, WsHub};
 use anyhow::Result;
-use futures_util::{SinkExt, StreamExt};
-use std::{net::SocketAddr, sync::Arc};
+use serde::Deserialize;
+use std::{fs, net::SocketAddr, sync::Arc};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter},
     net::{TcpListener, TcpStream},
-    sync::RwLock,
+    sync::{Mutex, RwLock},
 };
-use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::WebSocketStream;
 use tracing::{error, info};
+
+
+#[derive(Debug, Deserialize)]
+struct SyncpondConfig {
+    command_api_key: String,
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt().with_env_filter("info").init();
 
-    let shared_state = Arc::new(RwLock::new(AppState::new()));
+    let config_path = std::env::var("SYNCPOND_CONFIG").unwrap_or_else(|_| "config.yaml".to_string());
+    let config_text = fs::read_to_string(config_path)?;
+    let config: SyncpondConfig = serde_yaml::from_str(&config_text)?;
+
+    let mut base_state = AppState::new();
+    base_state.set_command_api_key(config.command_api_key);
+
+    let shared_state = Arc::new(RwLock::new(base_state));
+    let ws_hub = Arc::new(Mutex::new(WsHub::new()));
 
     let ws_state = shared_state.clone();
+    let ws_hub_for_ws = ws_hub.clone();
     let command_state = shared_state.clone();
+    let ws_hub_for_cmd = ws_hub.clone();
 
     let ws_server = tokio::spawn(async move {
         let listener = TcpListener::bind("127.0.0.1:8080").await.expect("ws bind");
@@ -30,8 +46,9 @@ async fn main() -> Result<()> {
 
         while let Ok((stream, peer)) = listener.accept().await {
             let state = ws_state.clone();
+            let hub = ws_hub_for_ws.clone();
             tokio::spawn(async move {
-                if let Err(err) = handle_ws_connection(stream, peer, state).await {
+                if let Err(err) = handle_ws_connection(stream, peer, state, hub).await {
                     error!(%err, peer = %peer, "ws connection error");
                 }
             });
@@ -44,8 +61,9 @@ async fn main() -> Result<()> {
 
         while let Ok((stream, peer)) = listener.accept().await {
             let state = command_state.clone();
+            let hub = ws_hub_for_cmd.clone();
             tokio::spawn(async move {
-                if let Err(err) = handle_command_connection(stream, peer, state).await {
+                if let Err(err) = handle_command_connection(stream, peer, state, hub).await {
                     error!(%err, peer = %peer, "command connection error");
                 }
             });
@@ -57,63 +75,43 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn handle_ws_connection(stream: TcpStream, peer: SocketAddr, state: SharedState) -> Result<()> {
-    let ws_stream = tokio_tungstenite::accept_async(stream).await?;
-    info!(%peer, "websocket connection established");
-
-    {
-        let mut app = state.write().await;
-        app.total_ws_connections += 1;
-        info!(total_ws_connections = app.total_ws_connections, "ws open connections");
-    }
-
-    let result = ws_echo_loop(ws_stream, peer).await;
-
-    {
-        let mut app = state.write().await;
-        app.total_ws_connections = app.total_ws_connections.saturating_sub(1);
-        info!(total_ws_connections = app.total_ws_connections, "ws connections after close");
-    }
-
-    result
-}
-
-async fn ws_echo_loop(mut ws_stream: WebSocketStream<TcpStream>, peer: SocketAddr) -> Result<()> {
-    while let Some(msg) = ws_stream.next().await {
-        let msg = msg?;
-
-        match msg {
-            Message::Text(text) => {
-                info!(%peer, %text, "ws text received");
-                ws_stream.send(Message::Text(format!("echo: {}", text))).await?;
-            }
-            Message::Binary(bin) => {
-                info!(%peer, bytes = bin.len(), "ws binary received");
-                ws_stream.send(Message::Binary(bin)).await?;
-            }
-            Message::Ping(payload) => {
-                ws_stream.send(Message::Pong(payload)).await?;
-            }
-            Message::Close(frame) => {
-                info!(%peer, ?frame, "ws close");
-                ws_stream.close(None).await?;
-                break;
-            }
-            _ => {}
-        }
-    }
-
-    info!(%peer, "ws disconnected");
-    Ok(())
-}
-
-async fn handle_command_connection(stream: TcpStream, peer: SocketAddr, state: SharedState) -> Result<()> {
+async fn handle_command_connection(
+    stream: TcpStream,
+    peer: SocketAddr,
+    state: SharedState,
+    ws_hub: Arc<Mutex<WsHub>>,
+) -> Result<()> {
     info!(%peer, "command connection established");
 
     let (reader, writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
     let mut writer = BufWriter::new(writer);
     let mut line = String::new();
+
+    // first message must be API key
+    line.clear();
+    let first_bytes = reader.read_line(&mut line).await?;
+    if first_bytes == 0 {
+        return Ok(());
+    }
+    let provided_key = line.trim();
+
+    let expected_key = {
+        let app = state.read().await;
+        app.command_api_key.clone()
+    };
+
+    if let Some(expected_key) = expected_key {
+        if provided_key != expected_key {
+            writer.write_all(b"ERROR invalid_api_key\n").await?;
+            writer.flush().await?;
+            return Ok(());
+        }
+    } else {
+        writer.write_all(b"ERROR api_key_not_configured\n").await?;
+        writer.flush().await?;
+        return Ok(());
+    }
 
     loop {
         line.clear();
@@ -127,10 +125,17 @@ async fn handle_command_connection(stream: TcpStream, peer: SocketAddr, state: S
             continue;
         }
 
-        let resp = process_command(trimmed, &state).await;
+        let (resp, updates) = process_command(trimmed, &state).await;
         writer.write_all(resp.as_bytes()).await?;
         writer.write_all(b"\n").await?;
         writer.flush().await?;
+
+        if !updates.is_empty() {
+            let mut hub = ws_hub.lock().await;
+            for update in updates {
+                hub.broadcast_update(update).await;
+            }
+        }
     }
 
     info!(%peer, "command disconnected");

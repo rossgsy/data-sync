@@ -1,0 +1,27 @@
+networks:
+  traefik:
+    external: true
+services:
+  syncpond-server:
+    build:
+      context: ./syncpond-server
+      dockerfile: Dockerfile
+    image: syncpond-server:latest
+    container_name: syncpond-server
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:9090:9090"   # Command socket port
+    networks:
+      - traefik
+    environment:
+      SYNCPOND_CONFIG: /app/config.yaml
+    volumes:
+      - ./syncpond-server/config.yaml:/app/config.yaml:ro
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=traefik"      
+      - "traefik.http.routers.syncpond.entrypoints=https"
+      - "traefik.http.routers.syncpond.rule=Host(`syncpond.${DNS_SUFFIX}`)"
+      - "traefik.http.routers.syncpond.tls=true"
+      - "traefik.http.routers.syncpond.tls.certresolver=zerossl"
+      - "traefik.http.services.syncpond.loadbalancer.server.port=80"

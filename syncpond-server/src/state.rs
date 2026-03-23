@@ -52,6 +52,7 @@ pub struct AppState {
     pub rooms: HashMap<u64, RoomState>,
     pub next_room_id: u64,
     pub jwt_key: Option<String>,
+    pub command_api_key: Option<String>,
 }
 
 impl AppState {
@@ -61,6 +62,7 @@ impl AppState {
             rooms: HashMap::new(),
             next_room_id: 1,
             jwt_key: None,
+            command_api_key: None,
         }
     }
 
@@ -151,6 +153,10 @@ impl AppState {
         self.jwt_key = Some(key);
     }
 
+    pub fn set_command_api_key(&mut self, key: String) {
+        self.command_api_key = Some(key);
+    }
+
     pub fn tx_begin(&mut self, room_id: u64) -> Result<(), StateError> {
         let room = self.rooms.get_mut(&room_id).ok_or(StateError::RoomNotFound)?;
         if room.tx_buffer.is_some() {
@@ -194,5 +200,64 @@ impl AppState {
         let room = self.rooms.get_mut(&room_id).ok_or(StateError::RoomNotFound)?;
         room.tx_buffer = None;
         Ok(())
+    }
+
+    pub fn room_snapshot(&self, room_id: u64, allowed_containers: &std::collections::HashSet<String>) -> Option<serde_json::Value> {
+        let room = self.rooms.get(&room_id)?;
+        let mut containers_json = serde_json::Map::new();
+
+        for (container_name, fragments) in &room.containers {
+            if container_name == "public" || allowed_containers.contains(container_name) {
+                let mut container_map = serde_json::Map::new();
+                for (key, entry) in fragments {
+                    container_map.insert(key.clone(), entry.value.clone());
+                }
+                containers_json.insert(container_name.clone(), serde_json::Value::Object(container_map));
+            }
+        }
+
+        Some(serde_json::json!({
+            "room_counter": room.room_counter,
+            "containers": serde_json::Value::Object(containers_json),
+        }))
+    }
+
+    pub fn room_delta(
+        &self,
+        room_id: u64,
+        since: u64,
+        allowed_containers: &std::collections::HashSet<String>,
+    ) -> Option<serde_json::Value> {
+        let room = self.rooms.get(&room_id)?;
+        if since >= room.room_counter {
+            return Some(serde_json::json!({
+                "room_counter": room.room_counter,
+                "containers": serde_json::Value::Object(serde_json::Map::new()),
+            }));
+        }
+
+        let mut containers_json = serde_json::Map::new();
+
+        for (container_name, fragments) in &room.containers {
+            if container_name != "public" && !allowed_containers.contains(container_name) {
+                continue;
+            }
+
+            let mut container_map = serde_json::Map::new();
+            for (key, entry) in fragments {
+                if entry.key_version > since {
+                    container_map.insert(key.clone(), entry.value.clone());
+                }
+            }
+
+            if !container_map.is_empty() {
+                containers_json.insert(container_name.clone(), serde_json::Value::Object(container_map));
+            }
+        }
+
+        Some(serde_json::json!({
+            "room_counter": room.room_counter,
+            "containers": serde_json::Value::Object(containers_json),
+        }))
     }
 }
