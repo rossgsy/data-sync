@@ -1,7 +1,10 @@
 use jsonwebtoken::{encode, EncodingKey, Header};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::{collections::{HashMap, HashSet}, sync::{Arc, RwLock}, time::SystemTime};
+use std::{collections::{HashMap, HashSet}, sync::{Arc, RwLock as StdRwLock}, time::SystemTime};
+use tokio::sync::RwLock;
+
+pub type SharedState = Arc<RwLock<AppState>>;
 
 #[derive(Debug)]
 pub struct FragmentEntry {
@@ -30,6 +33,7 @@ pub enum StateError {
     TxNotOpen,
     TxAlreadyOpen,
     JwtKeyNotConfigured,
+    JwtIssuerAudienceNotConfigured,
 }
 
 impl std::fmt::Display for StateError {
@@ -41,21 +45,22 @@ impl std::fmt::Display for StateError {
             StateError::TxNotOpen => write!(f, "tx_not_open"),
             StateError::TxAlreadyOpen => write!(f, "tx_already_open"),
             StateError::JwtKeyNotConfigured => write!(f, "jwt_key_not_configured"),
+            StateError::JwtIssuerAudienceNotConfigured => write!(f, "jwt_issuer_audience_not_configured"),
         }
     }
 }
 
 impl std::error::Error for StateError {}
 
-pub type SharedState = Arc<RwLock<AppState>>;
-
 #[derive(Debug)]
 pub struct AppState {
     pub total_ws_connections: usize,
-    pub rooms: HashMap<u64, Arc<RwLock<RoomState>>>,
+    pub rooms: HashMap<u64, Arc<StdRwLock<RoomState>>>,
     pub next_room_id: u64,
     pub jwt_key: Option<String>,
     pub jwt_ttl_seconds: u64,
+    pub jwt_issuer: Option<String>,
+    pub jwt_audience: Option<String>,
     pub command_api_key: Option<String>,
 }
 
@@ -67,6 +72,8 @@ impl AppState {
             next_room_id: 1,
             jwt_key: None,
             jwt_ttl_seconds: 3600,
+            jwt_issuer: None,
+            jwt_audience: None,
             command_api_key: None,
         }
     }
@@ -76,7 +83,7 @@ impl AppState {
         self.next_room_id += 1;
         self.rooms.insert(
             room_id,
-            Arc::new(RwLock::new(RoomState {
+            Arc::new(StdRwLock::new(RoomState {
                 containers: HashMap::new(),
                 room_counter: 0,
                 tx_buffer: None,
@@ -109,12 +116,13 @@ impl AppState {
         }
 
         room.room_counter += 1;
+        let key_version = room.room_counter;
         let container_map = room.containers.entry(container).or_default();
         container_map.insert(
             key,
             FragmentEntry {
                 value,
-                key_version: room.room_counter,
+                key_version,
             },
         );
 
@@ -158,6 +166,38 @@ impl AppState {
         Ok(room.room_counter)
     }
 
+    pub fn list_rooms(&self) -> Vec<u64> {
+        let mut ids: Vec<u64> = self.rooms.keys().copied().collect();
+        ids.sort_unstable();
+        ids
+    }
+
+    pub fn room_info(&self, room_id: u64) -> Result<serde_json::Value, StateError> {
+        let room_arc = self.rooms.get(&room_id).ok_or(StateError::RoomNotFound)?;
+        let room = room_arc.read().map_err(|_| StateError::RoomNotFound)?;
+
+        let container_count = room.containers.len();
+        let fragment_count: usize = room.containers.values().map(|c| c.len()).sum();
+
+        Ok(serde_json::json!({
+            "room_id": room_id,
+            "room_counter": room.room_counter,
+            "container_count": container_count,
+            "fragment_count": fragment_count,
+        }))
+    }
+
+    pub fn metrics(&self) -> serde_json::Value {
+        let room_count = self.rooms.len();
+        let ws_connections = self.total_ws_connections;
+
+        serde_json::json!({
+            "room_count": room_count,
+            "ws_connections": ws_connections,
+            "next_room_id": self.next_room_id,
+        })
+    }
+
     pub fn set_jwt_key(&mut self, key: String) {
         self.jwt_key = Some(key);
     }
@@ -166,12 +206,30 @@ impl AppState {
         self.jwt_ttl_seconds = seconds;
     }
 
+    pub fn set_jwt_issuer(&mut self, issuer: String) {
+        self.jwt_issuer = Some(issuer);
+    }
+
+    pub fn set_jwt_audience(&mut self, audience: String) {
+        self.jwt_audience = Some(audience);
+    }
+
     pub fn set_command_api_key(&mut self, key: String) {
         self.command_api_key = Some(key);
     }
 
     pub fn create_room_token(&self, room_id: u64, containers: &[String]) -> Result<String, StateError> {
         let key = self.jwt_key.as_ref().ok_or(StateError::JwtKeyNotConfigured)?;
+
+        let _issuer = self
+            .jwt_issuer
+            .as_ref()
+            .ok_or(StateError::JwtIssuerAudienceNotConfigured)?;
+        let _audience = self
+            .jwt_audience
+            .as_ref()
+            .ok_or(StateError::JwtIssuerAudienceNotConfigured)?;
+
         if !self.rooms.contains_key(&room_id) {
             return Err(StateError::RoomNotFound);
         }
@@ -191,6 +249,8 @@ impl AppState {
             room: String,
             containers: Vec<String>,
             exp: usize,
+            iss: Option<String>,
+            aud: Option<String>,
         }
 
         let claims = JwtClaims {
@@ -198,6 +258,8 @@ impl AppState {
             room: room_id.to_string(),
             containers: container_set.into_iter().collect(),
             exp: exp as usize,
+            iss: self.jwt_issuer.clone(),
+            aud: self.jwt_audience.clone(),
         };
 
         encode(&Header::default(), &claims, &EncodingKey::from_secret(key.as_bytes()))
@@ -223,12 +285,13 @@ impl AppState {
             match op {
                 RoomCommand::Set { container, key, value } => {
                     room.room_counter += 1;
+                    let key_version = room.room_counter;
                     let container_map = room.containers.entry(container).or_default();
                     container_map.insert(
                         key,
                         FragmentEntry {
                             value,
-                            key_version: room.room_counter,
+                            key_version,
                         },
                     );
                 }
@@ -245,14 +308,16 @@ impl AppState {
         Ok(())
     }
 
-    pub fn tx_abort(&mut self, room_id: u64) -> Result<(), StateError> {
-        let room = self.rooms.get_mut(&room_id).ok_or(StateError::RoomNotFound)?;
+    pub fn tx_abort(&self, room_id: u64) -> Result<(), StateError> {
+        let room_arc = self.rooms.get(&room_id).ok_or(StateError::RoomNotFound)?;
+        let mut room = room_arc.write().map_err(|_| StateError::RoomNotFound)?;
         room.tx_buffer = None;
         Ok(())
     }
 
     pub fn room_snapshot(&self, room_id: u64, allowed_containers: &std::collections::HashSet<String>) -> Option<serde_json::Value> {
-        let room = self.rooms.get(&room_id)?;
+        let room_arc = self.rooms.get(&room_id)?;
+        let room = room_arc.read().ok()?;
         let mut containers_json = serde_json::Map::new();
 
         for (container_name, fragments) in &room.containers {
@@ -277,7 +342,8 @@ impl AppState {
         since: u64,
         allowed_containers: &std::collections::HashSet<String>,
     ) -> Option<serde_json::Value> {
-        let room = self.rooms.get(&room_id)?;
+        let room_arc = self.rooms.get(&room_id)?;
+        let room = room_arc.read().ok()?;
         if since >= room.room_counter {
             return Some(serde_json::json!({
                 "room_counter": room.room_counter,
@@ -328,7 +394,7 @@ mod tests {
         assert_eq!(app.room_version(room_id).unwrap(), 1);
 
         let (value, kv) = app.get_fragment(room_id, "public", "foo").unwrap();
-        assert_eq!(value, &json!("bar"));
+        assert_eq!(value, json!("bar"));
         assert_eq!(kv, 1);
 
         app.del_fragment(room_id, "public".into(), "foo".into()).unwrap();
@@ -356,7 +422,7 @@ mod tests {
         assert_eq!(app.room_version(room_id).unwrap(), 1);
 
         let (value, key_version) = app.get_fragment(room_id, "public", "a").unwrap();
-        assert_eq!(value, &json!(1));
+        assert_eq!(value, json!(1));
         assert_eq!(key_version, 1);
 
         app.tx_begin(room_id).unwrap();
@@ -364,7 +430,7 @@ mod tests {
         app.tx_abort(room_id).unwrap();
 
         let (value, kv) = app.get_fragment(room_id, "public", "a").unwrap();
-        assert_eq!(value, &json!(1));
+        assert_eq!(value, json!(1));
         assert_eq!(kv, 1);
     }
 

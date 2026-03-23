@@ -34,6 +34,23 @@ pub async fn process_command(line: &str, state: &SharedState) -> (String, Vec<Ro
                 Err(e) => (error_of(e), vec![]),
             }
         }
+        "ROOM.LIST" => {
+            let app = state.read().await;
+            let rooms = app.list_rooms();
+            let payload = serde_json::to_string(&rooms).unwrap_or_else(|_| "[]".into());
+            (format!("OK {}", payload), vec![])
+        }
+        "ROOM.INFO" => {
+            let room_id = match parse_next_room_id(&mut words) {
+                Ok(id) => id,
+                Err(err) => return (err, vec![]),
+            };
+            let app = state.read().await;
+            match app.room_info(room_id) {
+                Ok(info) => (format!("OK {}", info), vec![]),
+                Err(e) => (error_of(e), vec![]),
+            }
+        }
         "SET" => {
             let room_id = match parse_next_room_id(&mut words) {
                 Ok(id) => id,
@@ -55,16 +72,23 @@ pub async fn process_command(line: &str, state: &SharedState) -> (String, Vec<Ro
 
             let mut app = state.write().await;
             match app.set_fragment(room_id, container.clone(), key.clone(), value.clone()) {
-                Ok(()) => (
-                    "OK".into(),
-                    vec![RoomUpdate {
-                        room_id,
-                        container,
-                        key,
-                        value: Some(value),
-                        room_counter: app.rooms.get(&room_id).map(|r| r.room_counter).unwrap_or(0),
-                    }],
-                ),
+                Ok(()) => {
+                    let room_counter = app
+                        .rooms
+                        .get(&room_id)
+                        .and_then(|r| r.read().ok().map(|room| room.room_counter))
+                        .unwrap_or(0);
+                    (
+                        "OK".into(),
+                        vec![RoomUpdate {
+                            room_id,
+                            container,
+                            key,
+                            value: Some(value),
+                            room_counter,
+                        }],
+                    )
+                },
                 Err(e) => (error_of(e), vec![]),
             }
         }
@@ -83,16 +107,23 @@ pub async fn process_command(line: &str, state: &SharedState) -> (String, Vec<Ro
             };
             let mut app = state.write().await;
             match app.del_fragment(room_id, container.clone(), key.clone()) {
-                Ok(()) => (
-                    "OK".into(),
-                    vec![RoomUpdate {
-                        room_id,
-                        container,
-                        key,
-                        value: None,
-                        room_counter: app.rooms.get(&room_id).map(|r| r.room_counter).unwrap_or(0),
-                    }],
-                ),
+                Ok(()) => {
+                    let room_counter = app
+                        .rooms
+                        .get(&room_id)
+                        .and_then(|r| r.read().ok().map(|room| room.room_counter))
+                        .unwrap_or(0);
+                    (
+                        "OK".into(),
+                        vec![RoomUpdate {
+                            room_id,
+                            container,
+                            key,
+                            value: None,
+                            room_counter,
+                        }],
+                    )
+                },
                 Err(e) => (error_of(e), vec![]),
             }
         }
@@ -112,7 +143,7 @@ pub async fn process_command(line: &str, state: &SharedState) -> (String, Vec<Ro
             let app = state.read().await;
             match app.get_fragment(room_id, &container, &key) {
                 Ok((v, kv)) => {
-                    let value_text = serde_json::to_string(v).unwrap_or_else(|_| "null".into());
+                    let value_text = serde_json::to_string(&v).unwrap_or_else(|_| "null".into());
                     (format!("OK {} {}", value_text, kv), vec![])
                 }
                 Err(e) => (error_of(e), vec![]),
@@ -157,7 +188,7 @@ pub async fn process_command(line: &str, state: &SharedState) -> (String, Vec<Ro
             let mut app = state.write().await;
             match app.tx_end(room_id) {
                 Ok(()) => {
-                    let room_counter = app.rooms.get(&room_id).map(|r| r.room_counter).unwrap_or(0);
+                    let room_counter = app.room_version(room_id).unwrap_or(0);
                     ("OK".into(), vec![RoomUpdate { room_id, container: "*".to_string(), key: "*".to_string(), value: None, room_counter }])
                 }
                 Err(e) => (error_of(e), vec![]),
@@ -206,10 +237,30 @@ fn parse_next_room_id(words: &mut std::str::SplitN<'_, char>) -> Result<u64, Str
 }
 
 fn parse_next_string(words: &mut std::str::SplitN<'_, char>) -> Result<String, String> {
-    words
+    let token = words
         .next()
-        .map(|s| s.to_string())
-        .ok_or_else(|| "ERROR missing_argument".into())
+        .ok_or_else(|| String::from("ERROR missing_argument"))?;
+
+    if token.starts_with('"') {
+        if token.ends_with('"') && token.len() >= 2 {
+            return Ok(token[1..token.len() - 1].to_string());
+        }
+
+        let mut accum = token[1..].to_string();
+        while let Some(next) = words.next() {
+            if next.ends_with('"') {
+                accum.push(' ');
+                accum.push_str(&next[..next.len() - 1]);
+                return Ok(accum);
+            }
+            accum.push(' ');
+            accum.push_str(next);
+        }
+
+        return Err("ERROR invalid_argument".into());
+    }
+
+    Ok(token.to_string())
 }
 
 fn error_of(err: StateError) -> String {

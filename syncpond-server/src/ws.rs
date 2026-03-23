@@ -157,10 +157,22 @@ pub async fn handle_ws_connection(
         }
     };
 
+    let validation = {
+        let app = state.read().await;
+        let mut v = Validation::new(Algorithm::HS256);
+        if let Some(issuer) = app.jwt_issuer.as_ref() {
+            v.set_issuer(&[issuer.clone()]);
+        }
+        if let Some(audience) = app.jwt_audience.as_ref() {
+            v.set_audience(&[audience.clone()]);
+        }
+        v
+    };
+
     let token_data = match decode::<Claims>(
         &auth_msg.jwt,
         &DecodingKey::from_secret(jwt_key.as_ref()),
-        &Validation::new(Algorithm::HS256),
+        &validation,
     ) {
         Ok(data) => data,
         Err(_) => {

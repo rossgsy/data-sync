@@ -21,7 +21,10 @@ struct SyncpondConfig {
     command_api_key: String,
     ws_addr: Option<String>,
     command_addr: Option<String>,
+    health_addr: Option<String>,
     jwt_key: Option<String>,
+    jwt_issuer: Option<String>,
+    jwt_audience: Option<String>,
     jwt_ttl_seconds: Option<u64>,
 }
 
@@ -38,6 +41,12 @@ async fn main() -> Result<()> {
     if let Some(jwt) = config.jwt_key.clone() {
         base_state.set_jwt_key(jwt);
     }
+    if let Some(issuer) = config.jwt_issuer.clone() {
+        base_state.set_jwt_issuer(issuer);
+    }
+    if let Some(audience) = config.jwt_audience.clone() {
+        base_state.set_jwt_audience(audience);
+    }
     if let Some(ttl) = config.jwt_ttl_seconds {
         base_state.set_jwt_ttl(ttl);
     }
@@ -51,6 +60,7 @@ async fn main() -> Result<()> {
 
     let ws_addr = config.ws_addr.unwrap_or_else(|| "127.0.0.1:8080".to_string());
     let command_addr = config.command_addr.unwrap_or_else(|| "127.0.0.1:9090".to_string());
+    let health_addr = config.health_addr.unwrap_or_else(|| "127.0.0.1:7070".to_string());
 
     let ws_addr: SocketAddr = ws_addr
         .parse()
@@ -105,6 +115,26 @@ async fn main() -> Result<()> {
         Ok::<(), anyhow::Error>(())
     });
 
+    let health_state = shared_state.clone();
+    let health_addr_for_task = health_addr.clone();
+    let health_server = tokio::spawn(async move {
+        info!("syncpond health server listening on {}", health_addr_for_task);
+        let listener = TcpListener::bind(health_addr_for_task).await.context("health bind failed")?;
+
+        loop {
+            let (stream, peer) = listener.accept().await?;
+            let state = health_state.clone();
+            tokio::spawn(async move {
+                if let Err(err) = handle_health_connection(stream, state).await {
+                    error!(%err, peer = %peer, "health connection error");
+                }
+            });
+        }
+
+        #[allow(unreachable_code)]
+        Ok::<(), anyhow::Error>(())
+    });
+
     let shutdown = async {
         tokio::signal::ctrl_c().await.context("failed to listen for ctrl-c")?;
         info!("shutdown signal received");
@@ -115,9 +145,47 @@ async fn main() -> Result<()> {
         res = shutdown => res?,
         res = ws_server => res??,
         res = command_server => res??,
+        res = health_server => res??,
     }
 
     info!("server shutdown complete");
+    Ok(())
+}
+
+async fn handle_health_connection(stream: TcpStream, state: SharedState) -> Result<()> {
+    let (reader, writer) = stream.into_split();
+    let mut reader = BufReader::new(reader);
+    let mut writer = BufWriter::new(writer);
+    let mut line = String::new();
+
+    let bytes = reader.read_line(&mut line).await?;
+    if bytes == 0 {
+        return Ok(());
+    }
+
+    let parts: Vec<&str> = line.trim_end().split_whitespace().collect();
+    let (status, body) = if parts.len() >= 2 && parts[0] == "GET" {
+        match parts[1] {
+            "/health" => ("200 OK", "ok".to_string()),
+            "/metrics" => {
+                let app = state.read().await;
+                ("200 OK", serde_json::to_string(&app.metrics()).unwrap_or_else(|_| "{}".into()))
+            }
+            _ => ("404 Not Found", "not found".to_string()),
+        }
+    } else {
+        ("400 Bad Request", "bad request".to_string())
+    };
+
+    let response = format!(
+        "HTTP/1.1 {}\r\ncontent-type: text/plain; charset=utf-8\r\ncontent-length: {}\r\n\r\n{}",
+        status,
+        body.len(),
+        body
+    );
+
+    writer.write_all(response.as_bytes()).await?;
+    writer.flush().await?;
     Ok(())
 }
 
