@@ -1,3 +1,4 @@
+use crate::rate_limiter::RateLimiter;
 use crate::state::SharedState;
 use crate::commands::RoomUpdate;
 use anyhow::Result;
@@ -108,12 +109,25 @@ pub struct AuthMessage {
     pub last_seen_counter: Option<u64>,
 }
 
+const WS_AUTH_LIMIT: usize = 10;
+const WS_AUTH_WINDOW_SECS: u64 = 60;
+
 pub async fn handle_ws_connection(
     stream: TcpStream,
     peer: SocketAddr,
     state: SharedState,
     ws_hub: Arc<Mutex<WsHub>>,
+    rate_limiter: Arc<RateLimiter>,
 ) -> Result<()> {
+    let key = peer.ip().to_string();
+    let allowed = rate_limiter
+        .allow(&key, WS_AUTH_LIMIT, std::time::Duration::from_secs(WS_AUTH_WINDOW_SECS))
+        .await;
+    if !allowed {
+        info!(%peer, "ws auth rate limit exceeded");
+        return Ok(());
+    }
+
     let ws_stream = tokio_tungstenite::accept_async(stream).await?;
     info!(%peer, "websocket connection established");
 

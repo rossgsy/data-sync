@@ -1,8 +1,10 @@
 mod commands;
+mod rate_limiter;
 mod state;
 mod ws;
 
 use crate::commands::process_command;
+use crate::rate_limiter::RateLimiter;
 use crate::state::{AppState, SharedState};
 use crate::ws::{handle_ws_connection, WsHub};
 use anyhow::{Context, Result};
@@ -53,6 +55,8 @@ async fn main() -> Result<()> {
 
     let shared_state = Arc::new(RwLock::new(base_state));
     let ws_hub = Arc::new(Mutex::new(WsHub::new()));
+    let ws_rate_limiter = Arc::new(RateLimiter::new());
+    let command_rate_limiter = Arc::new(RateLimiter::new());
 
     if config.command_api_key.trim().is_empty() {
         anyhow::bail!("command_api_key must be configured and non-empty");
@@ -71,8 +75,10 @@ async fn main() -> Result<()> {
 
     let ws_state = shared_state.clone();
     let ws_hub_for_ws = ws_hub.clone();
+    let ws_rate_limiter_for_ws = ws_rate_limiter.clone();
     let command_state = shared_state.clone();
     let ws_hub_for_cmd = ws_hub.clone();
+    let command_rate_limiter_for_cmd = command_rate_limiter.clone();
 
     let ws_addr_for_task = ws_addr.clone();
     let command_addr_for_task = command_addr.clone();
@@ -85,8 +91,9 @@ async fn main() -> Result<()> {
             let (stream, peer) = listener.accept().await?;
             let state = ws_state.clone();
             let hub = ws_hub_for_ws.clone();
+            let rate_limiter = ws_rate_limiter_for_ws.clone();
             tokio::spawn(async move {
-                if let Err(err) = handle_ws_connection(stream, peer, state, hub).await {
+                if let Err(err) = handle_ws_connection(stream, peer, state, hub, rate_limiter).await {
                     error!(%err, peer = %peer, "ws connection error");
                 }
             });
@@ -104,8 +111,9 @@ async fn main() -> Result<()> {
             let (stream, peer) = listener.accept().await?;
             let state = command_state.clone();
             let hub = ws_hub_for_cmd.clone();
+            let rate_limiter = command_rate_limiter_for_cmd.clone();
             tokio::spawn(async move {
-                if let Err(err) = handle_command_connection(stream, peer, state, hub).await {
+                if let Err(err) = handle_command_connection(stream, peer, state, hub, rate_limiter).await {
                     error!(%err, peer = %peer, "command connection error");
                 }
             });
@@ -189,12 +197,25 @@ async fn handle_health_connection(stream: TcpStream, state: SharedState) -> Resu
     Ok(())
 }
 
+const CMD_RATE_LIMIT: usize = 120;
+const CMD_RATE_WINDOW_SECS: u64 = 60;
+
 async fn handle_command_connection(
     stream: TcpStream,
     peer: SocketAddr,
     state: SharedState,
     ws_hub: Arc<Mutex<WsHub>>,
+    rate_limiter: Arc<RateLimiter>,
 ) -> Result<()> {
+    let key = peer.ip().to_string();
+    let allowed = rate_limiter
+        .allow(&key, CMD_RATE_LIMIT, std::time::Duration::from_secs(CMD_RATE_WINDOW_SECS))
+        .await;
+    if !allowed {
+        info!(%peer, "command rate limit exceeded");
+        return Ok(());
+    }
+
     info!(%peer, "command connection established");
 
     let (reader, writer) = stream.into_split();

@@ -1,14 +1,8 @@
 # syncpond-server TODO
 
-## ✅ Current status
-- Core command protocol implemented (`ROOM.CREATE`, `ROOM.DELETE`, `SET`, `DEL`, `GET`, `VERSION`, `TX.*`, `TOKEN.GEN`, `SET.JWTKEY`).
-- WebSocket auth via JWT token and room snapshot/delta logic exists.
-- In-memory room state with per-room counter and transaction buffering implemented.
-- Key operations are covered by unit tests in `src/commands.rs` and `src/state.rs`.
-
 ## 🛡️ Security and robustness
-- Implement rate limiting on command API and WS join/auth.
-- Add JWT verification audience/issuer checks in `ws.rs` and `state.rs`.
+- Implement rate limiting on command API and WS join/auth. ✅ implemented (in-memory per-IP limits)
+- Add JWT verification audience/issuer checks in `ws.rs` and `state.rs`. ✅ implemented
 
 ## 🧹 Consistency and correctness edge cases
 - `room_delta` currently sends only non-empty container keys, does not emit tombstone markers for deleted keys; clients with stale state might not be fully consistent.
