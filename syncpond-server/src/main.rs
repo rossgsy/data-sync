@@ -2,10 +2,10 @@ mod commands;
 mod state;
 mod ws;
 
-use crate::commands::{process_command, RoomUpdate};
+use crate::commands::process_command;
 use crate::state::{AppState, SharedState};
 use crate::ws::{handle_ws_connection, WsHub};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::{fs, net::SocketAddr, sync::Arc};
 use tokio::{
@@ -45,8 +45,19 @@ async fn main() -> Result<()> {
     let shared_state = Arc::new(RwLock::new(base_state));
     let ws_hub = Arc::new(Mutex::new(WsHub::new()));
 
+    if config.command_api_key.trim().is_empty() {
+        anyhow::bail!("command_api_key must be configured and non-empty");
+    }
+
     let ws_addr = config.ws_addr.unwrap_or_else(|| "127.0.0.1:8080".to_string());
     let command_addr = config.command_addr.unwrap_or_else(|| "127.0.0.1:9090".to_string());
+
+    let ws_addr: SocketAddr = ws_addr
+        .parse()
+        .with_context(|| format!("invalid ws_addr: {}", ws_addr))?;
+    let command_addr: SocketAddr = command_addr
+        .parse()
+        .with_context(|| format!("invalid command_addr: {}", command_addr))?;
 
     let ws_state = shared_state.clone();
     let ws_hub_for_ws = ws_hub.clone();
@@ -57,10 +68,11 @@ async fn main() -> Result<()> {
     let command_addr_for_task = command_addr.clone();
 
     let ws_server = tokio::spawn(async move {
-        let listener = TcpListener::bind(&ws_addr_for_task).await.expect("ws bind");
+        let listener = TcpListener::bind(ws_addr_for_task).await.context("ws bind failed")?;
         info!("syncpond websocket server listening on {}", ws_addr_for_task);
 
-        while let Ok((stream, peer)) = listener.accept().await {
+        loop {
+            let (stream, peer) = listener.accept().await?;
             let state = ws_state.clone();
             let hub = ws_hub_for_ws.clone();
             tokio::spawn(async move {
@@ -69,13 +81,17 @@ async fn main() -> Result<()> {
                 }
             });
         }
+
+        #[allow(unreachable_code)]
+        Ok::<(), anyhow::Error>(())
     });
 
     let command_server = tokio::spawn(async move {
-        let listener = TcpListener::bind(&command_addr_for_task).await.expect("cmd bind");
+        let listener = TcpListener::bind(command_addr_for_task).await.context("cmd bind failed")?;
         info!("syncpond command socket listening on {}", command_addr_for_task);
 
-        while let Ok((stream, peer)) = listener.accept().await {
+        loop {
+            let (stream, peer) = listener.accept().await?;
             let state = command_state.clone();
             let hub = ws_hub_for_cmd.clone();
             tokio::spawn(async move {
@@ -84,10 +100,24 @@ async fn main() -> Result<()> {
                 }
             });
         }
+
+        #[allow(unreachable_code)]
+        Ok::<(), anyhow::Error>(())
     });
 
-    tokio::try_join!(ws_server, command_server)?;
+    let shutdown = async {
+        tokio::signal::ctrl_c().await.context("failed to listen for ctrl-c")?;
+        info!("shutdown signal received");
+        Ok::<(), anyhow::Error>(())
+    };
 
+    tokio::select! {
+        res = shutdown => res?,
+        res = ws_server => res??,
+        res = command_server => res??,
+    }
+
+    info!("server shutdown complete");
     Ok(())
 }
 

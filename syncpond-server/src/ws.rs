@@ -2,13 +2,13 @@ use crate::state::SharedState;
 use crate::commands::RoomUpdate;
 use anyhow::Result;
 use futures_util::{SinkExt, StreamExt};
-use jsonwebtoken::{decode, DecodingKey, Validation};
+use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{collections::{HashMap, HashSet}, net::SocketAddr, sync::Arc};
 use tokio::{
     net::TcpStream,
-    sync::{mpsc, Mutex, RwLock},
+    sync::{mpsc, Mutex},
 };
 use tokio_tungstenite::tungstenite::Message;
 use tracing::{error, info};
@@ -47,11 +47,6 @@ impl WsHub {
     }
 
     pub async fn broadcast_update(&mut self, update: RoomUpdate) {
-        let room_clients = match self.rooms.get_mut(&update.room_id) {
-            Some(rc) => rc,
-            None => return,
-        };
-
         let event = if update.container == "*" && update.key == "*" {
             json!({
                 "type": "room_update",
@@ -78,13 +73,21 @@ impl WsHub {
             })
         };
 
-        for client in room_clients.values() {
-            if update.container == "*"
-                || update.container == "public"
-                || client.allowed_containers.contains(&update.container)
-            {
-                let _ = client.sender.send(event.clone());
-            }
+        let senders: Vec<_> = match self.rooms.get(&update.room_id) {
+            Some(room_clients) => room_clients
+                .values()
+                .filter(|client| {
+                    update.container == "*"
+                        || update.container == "public"
+                        || client.allowed_containers.contains(&update.container)
+                })
+                .map(|client| client.sender.clone())
+                .collect(),
+            None => return,
+        };
+
+        for sender in senders {
+            let _ = sender.send(event.clone());
         }
     }
 }
@@ -157,7 +160,7 @@ pub async fn handle_ws_connection(
     let token_data = match decode::<Claims>(
         &auth_msg.jwt,
         &DecodingKey::from_secret(jwt_key.as_ref()),
-        &Validation::default(),
+        &Validation::new(Algorithm::HS256),
     ) {
         Ok(data) => data,
         Err(_) => {

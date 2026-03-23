@@ -1,8 +1,7 @@
 use jsonwebtoken::{encode, EncodingKey, Header};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::{collections::{HashMap, HashSet}, sync::Arc, time::SystemTime};
-use tokio::sync::RwLock;
+use std::{collections::{HashMap, HashSet}, sync::{Arc, RwLock}, time::SystemTime};
 
 #[derive(Debug)]
 pub struct FragmentEntry {
@@ -53,7 +52,7 @@ pub type SharedState = Arc<RwLock<AppState>>;
 #[derive(Debug)]
 pub struct AppState {
     pub total_ws_connections: usize,
-    pub rooms: HashMap<u64, RoomState>,
+    pub rooms: HashMap<u64, Arc<RwLock<RoomState>>>,
     pub next_room_id: u64,
     pub jwt_key: Option<String>,
     pub jwt_ttl_seconds: u64,
@@ -77,11 +76,11 @@ impl AppState {
         self.next_room_id += 1;
         self.rooms.insert(
             room_id,
-            RoomState {
+            Arc::new(RwLock::new(RoomState {
                 containers: HashMap::new(),
                 room_counter: 0,
                 tx_buffer: None,
-            },
+            })),
         );
         room_id
     }
@@ -95,13 +94,14 @@ impl AppState {
     }
 
     pub fn set_fragment(
-        &mut self,
+        &self,
         room_id: u64,
         container: String,
         key: String,
         value: Value,
     ) -> Result<(), StateError> {
-        let room = self.rooms.get_mut(&room_id).ok_or(StateError::RoomNotFound)?;
+        let room_arc = self.rooms.get(&room_id).ok_or(StateError::RoomNotFound)?;
+        let mut room = room_arc.write().map_err(|_| StateError::RoomNotFound)?;
 
         if let Some(buffer) = room.tx_buffer.as_mut() {
             buffer.push(RoomCommand::Set { container, key, value });
@@ -305,3 +305,70 @@ impl AppState {
         }))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_room_set_get_del() {
+        let mut app = AppState::new();
+        let room_id = app.create_room();
+
+        assert_eq!(room_id, 1);
+        assert_eq!(app.room_version(room_id).unwrap(), 0);
+
+        app.set_fragment(room_id, "public".into(), "foo".into(), json!("bar")).unwrap();
+        assert_eq!(app.room_version(room_id).unwrap(), 1);
+
+        let (value, kv) = app.get_fragment(room_id, "public", "foo").unwrap();
+        assert_eq!(value, &json!("bar"));
+        assert_eq!(kv, 1);
+
+        app.del_fragment(room_id, "public".into(), "foo".into()).unwrap();
+        assert_eq!(app.room_version(room_id).unwrap(), 2);
+
+        assert!(matches!(app.get_fragment(room_id, "public", "foo"), Err(StateError::FragmentNotFound)));
+    }
+
+    #[test]
+    fn test_tx_begin_end_abort() {
+        let mut app = AppState::new();
+        let room_id = app.create_room();
+
+        app.tx_begin(room_id).unwrap();
+        assert!(matches!(app.tx_begin(room_id), Err(StateError::TxAlreadyOpen)));
+
+        app.set_fragment(room_id, "public".into(), "a".into(), json!(1)).unwrap();
+        app.del_fragment(room_id, "public".into(), "missing".into()).unwrap();
+
+        // not applied until tx_end
+        let maybe = app.get_fragment(room_id, "public", "a");
+        assert!(maybe.is_err());
+
+        app.tx_end(room_id).unwrap();
+        assert_eq!(app.room_version(room_id).unwrap(), 1);
+
+        let (value, key_version) = app.get_fragment(room_id, "public", "a").unwrap();
+        assert_eq!(value, &json!(1));
+        assert_eq!(key_version, 1);
+
+        app.tx_begin(room_id).unwrap();
+        app.set_fragment(room_id, "public".into(), "a".into(), json!(2)).unwrap();
+        app.tx_abort(room_id).unwrap();
+
+        let (value, kv) = app.get_fragment(room_id, "public", "a").unwrap();
+        assert_eq!(value, &json!(1));
+        assert_eq!(kv, 1);
+    }
+
+    #[test]
+    fn test_delete_room() {
+        let mut app = AppState::new();
+        let room_id = app.create_room();
+        assert!(app.delete_room(room_id).is_ok());
+        assert!(matches!(app.delete_room(room_id), Err(StateError::RoomNotFound)));
+    }
+}
+

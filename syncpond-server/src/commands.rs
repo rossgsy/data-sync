@@ -215,3 +215,70 @@ fn parse_next_string(words: &mut std::str::SplitN<'_, char>) -> Result<String, S
 fn error_of(err: StateError) -> String {
     format!("ERROR {}", err)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::{AppState, SharedState};
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+
+    fn sample_state() -> SharedState {
+        let mut app = AppState::new();
+        app.set_command_api_key("secret".to_string());
+        Arc::new(RwLock::new(app))
+    }
+
+    #[tokio::test]
+    async fn test_process_command_flow() {
+        let state = sample_state();
+
+        let (resp, _) = process_command("ROOM.CREATE", &state).await;
+        assert!(resp.starts_with("OK"));
+
+        let (resp, updates) = process_command("SET 1 public foo \"bar\"", &state).await;
+        assert_eq!(resp, "OK");
+        assert_eq!(updates.len(), 1);
+
+        let (resp, _) = process_command("GET 1 public foo", &state).await;
+        assert!(resp.starts_with("OK \"bar\""));
+
+        let (resp, _) = process_command("VERSION 1", &state).await;
+        assert_eq!(resp, "OK 1");
+
+        let (resp, updates) = process_command("DEL 1 public foo", &state).await;
+        assert_eq!(resp, "OK");
+        assert_eq!(updates.len(), 1);
+
+        let (resp, _) = process_command("GET 1 public foo", &state).await;
+        assert_eq!(resp, "ERROR not_found");
+    }
+
+    #[tokio::test]
+    async fn test_process_tx_sequence() {
+        let state = sample_state();
+        process_command("ROOM.CREATE", &state).await;
+
+        let (resp, _) = process_command("TX.BEGIN 1", &state).await;
+        assert_eq!(resp, "OK");
+
+        let (resp, _) = process_command("SET 1 public x 10", &state).await;
+        assert_eq!(resp, "OK");
+
+        let (resp, _) = process_command("TX.END 1", &state).await;
+        assert_eq!(resp, "OK");
+
+        let (resp, _) = process_command("GET 1 public x", &state).await;
+        assert!(resp.starts_with("OK 10"));
+    }
+
+    #[tokio::test]
+    async fn test_token_gen_requires_jwt_key() {
+        let state = sample_state();
+        process_command("ROOM.CREATE", &state).await;
+
+        let (resp, _) = process_command("TOKEN.GEN 1 public", &state).await;
+        assert_eq!(resp, "ERROR jwt_key_not_configured");
+    }
+}
+
