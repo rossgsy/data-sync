@@ -318,23 +318,18 @@ impl AppState {
                     );
                 }
                 RoomCommand::Del { container, key } => {
-                    let should_tombstone = room
-                        .containers
-                        .get(&container)
-                        .map_or(false, |container_map| container_map.contains_key(&key));
-
-                    if should_tombstone {
-                        room.room_counter += 1;
-                        let key_version = room.room_counter;
-                        let container_map = room.containers.get_mut(&container).unwrap();
-                        container_map.insert(
-                            key,
-                            FragmentEntry {
-                                value: Value::Null,
-                                key_version,
-                            },
-                        );
-                    }
+                    // For semantics, DEL in a transaction always tombstones the key, even if it did
+                    // not previously exist, so consumers can distinguish missing-vs-deleted state.
+                    room.room_counter += 1;
+                    let key_version = room.room_counter;
+                    let container_map = room.containers.entry(container).or_default();
+                    container_map.insert(
+                        key,
+                        FragmentEntry {
+                            value: Value::Null,
+                            key_version,
+                        },
+                    );
                 }
             }
         }
@@ -434,9 +429,8 @@ mod tests {
         app.del_fragment(room_id, "public".into(), "foo".into()).unwrap();
         assert_eq!(app.room_version(room_id).unwrap(), 2);
 
-        let (value, kv) = app.get_fragment(room_id, "public", "foo").unwrap();
-        assert_eq!(value, json!(null));
-        assert_eq!(kv, 2);
+        let err = app.get_fragment(room_id, "public", "foo").unwrap_err();
+        assert!(matches!(err, StateError::FragmentTombstone));
     }
 
     #[test]
@@ -455,11 +449,14 @@ mod tests {
         assert!(maybe.is_err());
 
         app.tx_end(room_id).unwrap();
-        assert_eq!(app.room_version(room_id).unwrap(), 1);
+        assert_eq!(app.room_version(room_id).unwrap(), 2);
 
         let (value, key_version) = app.get_fragment(room_id, "public", "a").unwrap();
         assert_eq!(value, json!(1));
         assert_eq!(key_version, 1);
+
+        let err = app.get_fragment(room_id, "public", "missing").unwrap_err();
+        assert!(matches!(err, StateError::FragmentTombstone));
 
         app.tx_begin(room_id).unwrap();
         app.set_fragment(room_id, "public".into(), "a".into(), json!(2)).unwrap();

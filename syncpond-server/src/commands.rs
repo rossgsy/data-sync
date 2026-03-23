@@ -421,6 +421,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_tx_end_with_del_tombstones_missing_key() {
+        let state = sample_state();
+        process_command("ROOM.CREATE", &state).await;
+
+        let (resp, _) = process_command("TX.BEGIN 1", &state).await;
+        assert_eq!(resp, "OK");
+
+        let (resp, _) = process_command("DEL 1 public missing-key", &state).await;
+        assert_eq!(resp, "OK");
+
+        let (resp, _) = process_command("TX.END 1", &state).await;
+        assert_eq!(resp, "OK");
+
+        let (resp, _) = process_command("GET 1 public missing-key", &state).await;
+        assert_eq!(resp, "ERROR tombstone");
+    }
+
+    #[tokio::test]
+    async fn test_tx_conflict_and_ordering_edge_cases() {
+        let state = sample_state();
+        process_command("ROOM.CREATE", &state).await;
+
+        // Cannot begin second transaction while first is open.
+        let (resp, _) = process_command("TX.BEGIN 1", &state).await;
+        assert_eq!(resp, "OK");
+        let (resp, _) = process_command("TX.BEGIN 1", &state).await;
+        assert_eq!(resp, "ERROR tx_already_open");
+
+        // Interleaved transactional operations are committed in order.
+        let (resp, _) = process_command("SET 1 public a 1", &state).await;
+        assert_eq!(resp, "OK");
+
+        let (resp, _) = process_command("DEL 1 public a", &state).await;
+        assert_eq!(resp, "OK");
+
+        let (resp, _) = process_command("SET 1 public a 2", &state).await;
+        assert_eq!(resp, "OK");
+
+        let (resp, _) = process_command("TX.END 1", &state).await;
+        assert_eq!(resp, "OK");
+
+        let (resp, _) = process_command("GET 1 public a", &state).await;
+        assert!(resp.starts_with("OK 2"));
+    }
+
+    #[tokio::test]
     async fn test_token_gen_requires_jwt_key() {
         let state = sample_state();
         process_command("ROOM.CREATE", &state).await;

@@ -17,8 +17,8 @@
 
 ## 3. Transaction semantics consistency
 
-- [ ] Clarify `TX.END` behavior: currently `DEL` only tombstones if key existed at commit time; check intended semantics and align with spec.
-- [ ] Add tests for transaction conflict/ordering edge cases (interleaving clients, concurrent writes in same room).
+- [x] Clarify `TX.END` behavior: currently `DEL` only tombstones if key existed at commit time; check intended semantics and align with spec.
+- [x] Add tests for transaction conflict/ordering edge cases (interleaving clients, concurrent writes in same room).
 
 ## 4. WebSocket flow and room state
 
