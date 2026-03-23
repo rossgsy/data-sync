@@ -1,4 +1,4 @@
-# Project Plan: Rust Server + TypeScript Client Real-time JSON Sync
+# Project Plan: syncpond (Rust Server + TypeScript Client Real-time JSON Sync)
 
 ## 1. Goal
 Build a real-time synchronization platform where server applications can set key/value pairs in named rooms and have that state immediately broadcast to all connected clients in the same room. Clients are read-only replicas (downstream only) and do not originate updates; they receive room state and deltas from the server. The server treats write payloads as opaque values and does not require application-level structure semantics. This includes:
