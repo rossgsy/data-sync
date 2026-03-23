@@ -1,12 +1,12 @@
 use crate::rate_limiter::RateLimiter;
-use crate::state::SharedState;
+use crate::state::{AppState, SharedState};
 use crate::commands::RoomUpdate;
 use anyhow::Result;
 use futures_util::{SinkExt, StreamExt};
-use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
+use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::{collections::{HashMap, HashSet}, net::SocketAddr, sync::Arc};
+use std::{collections::{HashMap, HashSet}, net::SocketAddr, sync::Arc, time::{SystemTime, UNIX_EPOCH}};
 use tokio::{
     net::TcpStream,
     sync::{mpsc, Mutex},
@@ -112,6 +112,36 @@ pub struct AuthMessage {
 const WS_AUTH_LIMIT: usize = 10;
 const WS_AUTH_WINDOW_SECS: u64 = 60;
 
+fn validate_jwt_claims(app: &AppState, token: &str) -> Result<Claims, String> {
+    let jwt_key = app
+        .jwt_key
+        .as_ref()
+        .ok_or_else(|| "no_jwt_key".to_string())?;
+
+    let mut validation = Validation::new(Algorithm::HS256);
+    // Explicitly require `exp` and enforce expiration.
+    validation.set_required_spec_claims(&["exp"]);
+    validation.validate_exp = true;
+
+    if let Some(issuer) = app.jwt_issuer.as_ref() {
+        validation.set_issuer(&[issuer]);
+    }
+    if let Some(audience) = app.jwt_audience.as_ref() {
+        validation.set_audience(&[audience]);
+    }
+
+    let token_data = decode::<Claims>(token, &DecodingKey::from_secret(jwt_key.as_ref()), &validation)
+        .map_err(|e| format!("invalid_jwt:{}", e))?;
+
+    let claims = token_data.claims;
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as usize;
+    if claims.exp <= now {
+        return Err("expired_jwt".to_string());
+    }
+
+    Ok(claims)
+}
+
 pub async fn handle_ws_connection(
     stream: TcpStream,
     peer: SocketAddr,
@@ -159,44 +189,16 @@ pub async fn handle_ws_connection(
         return Ok(());
     }
 
-    let jwt_key = {
-        let app = state.read().await;
-        match app.jwt_key.clone() {
-            Some(k) => k,
-            None => {
-                let err = json!({"type":"auth_error","reason":"no_jwt_key"});
-                ws_sender.send(Message::Text(err.to_string())).await.ok();
-                return Ok(());
-            }
-        }
-    };
+    let app = state.read().await;
 
-    let validation = {
-        let app = state.read().await;
-        let mut v = Validation::new(Algorithm::HS256);
-        if let Some(issuer) = app.jwt_issuer.as_ref() {
-            v.set_issuer(&[issuer.clone()]);
-        }
-        if let Some(audience) = app.jwt_audience.as_ref() {
-            v.set_audience(&[audience.clone()]);
-        }
-        v
-    };
-
-    let token_data = match decode::<Claims>(
-        &auth_msg.jwt,
-        &DecodingKey::from_secret(jwt_key.as_ref()),
-        &validation,
-    ) {
-        Ok(data) => data,
-        Err(_) => {
-            let err = json!({"type":"auth_error","reason":"invalid_jwt"});
+    let claims = match validate_jwt_claims(&app, &auth_msg.jwt) {
+        Ok(claims) => claims,
+        Err(reason) => {
+            let err = json!({"type":"auth_error","reason":"invalid_jwt","detail": reason});
             ws_sender.send(Message::Text(err.to_string())).await.ok();
             return Ok(());
         }
     };
-
-    let claims = token_data.claims;
     let room_id: u64 = match claims.room.parse() {
         Ok(id) => id,
         Err(_) => {
@@ -307,4 +309,77 @@ pub async fn handle_ws_connection(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::AppState;
+    use jsonwebtoken::{encode, Header};
+    use serde::Serialize;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[derive(Debug, Serialize)]
+    struct IncompleteClaims {
+        sub: String,
+        room: String,
+        containers: Vec<String>,
+    }
+
+    #[tokio::test]
+    async fn test_validate_jwt_claims_success() {
+        let mut app = AppState::new();
+        app.set_jwt_key("secret".to_string());
+        app.set_jwt_issuer("my-issuer".to_string());
+        app.set_jwt_audience("my-aud".to_string());
+
+        let room_id = app.create_room();
+        let token = app.create_room_token(room_id, &["public".into()]).unwrap();
+
+        let claims = validate_jwt_claims(&app, &token).expect("token should be valid");
+        assert_eq!(claims.room, room_id.to_string());
+    }
+
+    #[tokio::test]
+    async fn test_validate_jwt_claims_expired() {
+        let mut app = AppState::new();
+        app.set_jwt_key("secret".to_string());
+
+        let past = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() - 3600;
+
+        #[derive(Debug, Serialize)]
+        struct ExpiredClaims {
+            sub: String,
+            room: String,
+            containers: Vec<String>,
+            exp: usize,
+        }
+
+        let claims = ExpiredClaims {
+            sub: "room:1".into(),
+            room: "1".into(),
+            containers: vec!["public".into()],
+            exp: past as usize,
+        };
+
+        let token = encode(&Header::default(), &claims, &jsonwebtoken::EncodingKey::from_secret("secret".as_ref())).unwrap();
+        let err = validate_jwt_claims(&app, &token).unwrap_err();
+        assert!(err.contains("expired_jwt") || err.contains("invalid_jwt"));
+    }
+
+    #[tokio::test]
+    async fn test_validate_jwt_claims_missing_exp() {
+        let mut app = AppState::new();
+        app.set_jwt_key("secret".to_string());
+
+        let claims = IncompleteClaims {
+            sub: "room:1".into(),
+            room: "1".into(),
+            containers: vec!["public".into()],
+        };
+
+        let token = encode(&Header::default(), &claims, &jsonwebtoken::EncodingKey::from_secret("secret".as_ref())).unwrap();
+        let err = validate_jwt_claims(&app, &token).unwrap_err();
+        assert!(err.contains("invalid_jwt"));
+    }
 }

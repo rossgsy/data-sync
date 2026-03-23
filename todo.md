@@ -5,7 +5,7 @@
 - [ ] Handle encrypted transport expectations (TLS) for both WebSocket and command/health listeners.
 - [ ] Add explicit bounds on incoming line lengths for TCP command and health endpoints to prevent OOM/DOS via huge payloads.
 - [ ] Make health endpoint configurable/auth protected or bind to loopback only (current behavior has no auth).
-- [ ] Enforce explicit `JWT` validation for possibly missing `exp` claim and reject expired tokens (jsonwebtoken default behavior may be permissive if not set; confirm/explicitly test).
+- [x] Enforce explicit `JWT` validation for possibly missing `exp` claim and reject expired tokens (jsonwebtoken default behavior may be permissive if not set; confirm/explicitly test).
 - [ ] Ensure command API key is not logged and is treated as a secret (avoid accidental structured logging of commands with secrets).
 - [ ] Add time-source fuzzing / monotonic-safe checks around `SystemTime::now` for JWT exp claims.
 
