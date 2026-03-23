@@ -11,23 +11,31 @@ pub struct RoomUpdate {
 }
 
 pub async fn process_command(line: &str, state: &SharedState) -> (String, Vec<RoomUpdate>) {
-    let mut words = line.splitn(5, ' ');
-    let cmd = match words.next() {
-        Some(s) => s,
-        None => return ("ERROR empty command".into(), vec![]),
-    };
+    let mut remainder = line.trim_start();
 
-    match cmd {
+    let (cmd, rest) = match take_token(remainder) {
+        Ok((token, rest)) => (token, rest),
+        Err(e) => return (e, vec![]),
+    };
+    remainder = rest;
+
+    match cmd.as_ref() {
         "ROOM.CREATE" => {
+            if !remainder.trim().is_empty() {
+                return ("ERROR extra_arguments".into(), vec![]);
+            }
             let mut app = state.write().await;
             let room_id = app.create_room();
             (format!("OK {}", room_id), vec![])
         }
         "ROOM.DELETE" => {
-            let room_id = match parse_next_room_id(&mut words) {
-                Ok(id) => id,
+            let (room_id, rest) = match parse_room_id_from_remainder(remainder) {
+                Ok(x) => x,
                 Err(err) => return (err, vec![]),
             };
+            if !rest.trim().is_empty() {
+                return ("ERROR extra_arguments".into(), vec![]);
+            }
             let mut app = state.write().await;
             match app.delete_room(room_id) {
                 Ok(()) => ("OK".into(), vec![]),
@@ -35,16 +43,22 @@ pub async fn process_command(line: &str, state: &SharedState) -> (String, Vec<Ro
             }
         }
         "ROOM.LIST" => {
+            if !remainder.trim().is_empty() {
+                return ("ERROR extra_arguments".into(), vec![]);
+            }
             let app = state.read().await;
             let rooms = app.list_rooms();
             let payload = serde_json::to_string(&rooms).unwrap_or_else(|_| "[]".into());
             (format!("OK {}", payload), vec![])
         }
         "ROOM.INFO" => {
-            let room_id = match parse_next_room_id(&mut words) {
-                Ok(id) => id,
+            let (room_id, rest) = match parse_room_id_from_remainder(remainder) {
+                Ok(x) => x,
                 Err(err) => return (err, vec![]),
             };
+            if !rest.trim().is_empty() {
+                return ("ERROR extra_arguments".into(), vec![]);
+            }
             let app = state.read().await;
             match app.room_info(room_id) {
                 Ok(info) => (format!("OK {}", info), vec![]),
@@ -52,24 +66,26 @@ pub async fn process_command(line: &str, state: &SharedState) -> (String, Vec<Ro
             }
         }
         "SET" => {
-            let room_id = match parse_next_room_id(&mut words) {
-                Ok(id) => id,
+            let (room_id, rest) = match parse_room_id_from_remainder(remainder) {
+                Ok(x) => x,
                 Err(err) => return (err, vec![]),
             };
-            let container = match parse_next_string(&mut words) {
-                Ok(c) => c,
+            let (container, rest) = match take_token(rest) {
+                Ok(x) => x,
                 Err(err) => return (err, vec![]),
             };
-            let key = match parse_next_string(&mut words) {
-                Ok(k) => k,
+            let (key, rest) = match take_token(rest) {
+                Ok(x) => x,
                 Err(err) => return (err, vec![]),
             };
-            let value_json = words.next().unwrap_or("");
+            let value_json = rest.trim_start();
+            if value_json.is_empty() {
+                return ("ERROR missing_value".into(), vec![]);
+            }
             let value: Value = match serde_json::from_str(value_json) {
                 Ok(v) => v,
                 Err(err) => return (format!("ERROR invalid_json {}", err), vec![]),
             };
-
             let mut app = state.write().await;
             match app.set_fragment(room_id, container.clone(), key.clone(), value.clone()) {
                 Ok(()) => {
@@ -88,23 +104,26 @@ pub async fn process_command(line: &str, state: &SharedState) -> (String, Vec<Ro
                             room_counter,
                         }],
                     )
-                },
+                }
                 Err(e) => (error_of(e), vec![]),
             }
         }
         "DEL" => {
-            let room_id = match parse_next_room_id(&mut words) {
-                Ok(id) => id,
+            let (room_id, rest) = match parse_room_id_from_remainder(remainder) {
+                Ok(x) => x,
                 Err(err) => return (err, vec![]),
             };
-            let container = match parse_next_string(&mut words) {
-                Ok(c) => c,
+            let (container, rest) = match take_token(rest) {
+                Ok(x) => x,
                 Err(err) => return (err, vec![]),
             };
-            let key = match parse_next_string(&mut words) {
-                Ok(k) => k,
+            let (key, rest) = match take_token(rest) {
+                Ok(x) => x,
                 Err(err) => return (err, vec![]),
             };
+            if !rest.trim().is_empty() {
+                return ("ERROR extra_arguments".into(), vec![]);
+            }
             let mut app = state.write().await;
             match app.del_fragment(room_id, container.clone(), key.clone()) {
                 Ok(()) => {
@@ -123,23 +142,26 @@ pub async fn process_command(line: &str, state: &SharedState) -> (String, Vec<Ro
                             room_counter,
                         }],
                     )
-                },
+                }
                 Err(e) => (error_of(e), vec![]),
             }
         }
         "GET" => {
-            let room_id = match parse_next_room_id(&mut words) {
-                Ok(id) => id,
+            let (room_id, rest) = match parse_room_id_from_remainder(remainder) {
+                Ok(x) => x,
                 Err(err) => return (err, vec![]),
             };
-            let container = match parse_next_string(&mut words) {
-                Ok(c) => c,
+            let (container, rest) = match take_token(rest) {
+                Ok(x) => x,
                 Err(err) => return (err, vec![]),
             };
-            let key = match parse_next_string(&mut words) {
-                Ok(k) => k,
+            let (key, rest) = match take_token(rest) {
+                Ok(x) => x,
                 Err(err) => return (err, vec![]),
             };
+            if !rest.trim().is_empty() {
+                return ("ERROR extra_arguments".into(), vec![]);
+            }
             let app = state.read().await;
             match app.get_fragment(room_id, &container, &key) {
                 Ok((v, kv)) => {
@@ -150,10 +172,13 @@ pub async fn process_command(line: &str, state: &SharedState) -> (String, Vec<Ro
             }
         }
         "VERSION" => {
-            let room_id = match parse_next_room_id(&mut words) {
-                Ok(id) => id,
+            let (room_id, rest) = match parse_room_id_from_remainder(remainder) {
+                Ok(x) => x,
                 Err(err) => return (err, vec![]),
             };
+            if !rest.trim().is_empty() {
+                return ("ERROR extra_arguments".into(), vec![]);
+            }
             let app = state.read().await;
             match app.room_version(room_id) {
                 Ok(v) => (format!("OK {}", v), vec![]),
@@ -161,19 +186,25 @@ pub async fn process_command(line: &str, state: &SharedState) -> (String, Vec<Ro
             }
         }
         "SET.JWTKEY" => {
-            let key = match parse_next_string(&mut words) {
-                Ok(k) => k,
+            let (key, rest) = match take_token(remainder) {
+                Ok(x) => x,
                 Err(err) => return (err, vec![]),
             };
+            if !rest.trim().is_empty() {
+                return ("ERROR extra_arguments".into(), vec![]);
+            }
             let mut app = state.write().await;
             app.set_jwt_key(key);
             ("OK".into(), vec![])
         }
         "TX.BEGIN" => {
-            let room_id = match parse_next_room_id(&mut words) {
-                Ok(id) => id,
+            let (room_id, rest) = match parse_room_id_from_remainder(remainder) {
+                Ok(x) => x,
                 Err(err) => return (err, vec![]),
             };
+            if !rest.trim().is_empty() {
+                return ("ERROR extra_arguments".into(), vec![]);
+            }
             let mut app = state.write().await;
             match app.tx_begin(room_id) {
                 Ok(()) => ("OK".into(), vec![]),
@@ -181,10 +212,13 @@ pub async fn process_command(line: &str, state: &SharedState) -> (String, Vec<Ro
             }
         }
         "TX.END" => {
-            let room_id = match parse_next_room_id(&mut words) {
-                Ok(id) => id,
+            let (room_id, rest) = match parse_room_id_from_remainder(remainder) {
+                Ok(x) => x,
                 Err(err) => return (err, vec![]),
             };
+            if !rest.trim().is_empty() {
+                return ("ERROR extra_arguments".into(), vec![]);
+            }
             let mut app = state.write().await;
             match app.tx_end(room_id) {
                 Ok(()) => {
@@ -195,10 +229,13 @@ pub async fn process_command(line: &str, state: &SharedState) -> (String, Vec<Ro
             }
         }
         "TX.ABORT" => {
-            let room_id = match parse_next_room_id(&mut words) {
-                Ok(id) => id,
+            let (room_id, rest) = match parse_room_id_from_remainder(remainder) {
+                Ok(x) => x,
                 Err(err) => return (err, vec![]),
             };
+            if !rest.trim().is_empty() {
+                return ("ERROR extra_arguments".into(), vec![]);
+            }
             let mut app = state.write().await;
             match app.tx_abort(room_id) {
                 Ok(()) => ("OK".into(), vec![]),
@@ -206,19 +243,25 @@ pub async fn process_command(line: &str, state: &SharedState) -> (String, Vec<Ro
             }
         }
         "TOKEN.GEN" => {
-            let mut tokens = line.split_whitespace();
-            let _ = tokens.next(); // skip command
-            let room_id_str = match tokens.next() {
-                Some(v) => v,
-                None => return ("ERROR invalid_room_id".into(), vec![]),
+            let (room_id_str, rest) = match take_token(remainder) {
+                Ok(x) => x,
+                Err(err) => return (err, vec![]),
             };
             let room_id = match room_id_str.parse::<u64>() {
                 Ok(id) => id,
                 Err(_) => return ("ERROR invalid_room_id".into(), vec![]),
             };
-
-            let containers: Vec<String> = tokens.map(String::from).collect();
-
+            let mut containers = Vec::new();
+            let mut leftover = rest;
+            while !leftover.trim().is_empty() {
+                match take_token(leftover) {
+                    Ok((tok, rem)) => {
+                        containers.push(tok);
+                        leftover = rem;
+                    }
+                    Err(err) => return (err, vec![]),
+                }
+            }
             let app = state.read().await;
             match app.create_room_token(room_id, &containers) {
                 Ok(token) => (format!("OK {}", token), vec![]),
@@ -229,38 +272,65 @@ pub async fn process_command(line: &str, state: &SharedState) -> (String, Vec<Ro
     }
 }
 
-fn parse_next_room_id(words: &mut std::str::SplitN<'_, char>) -> Result<u64, String> {
-    words
-        .next()
-        .ok_or_else(|| "ERROR invalid_room_id".into())
-        .and_then(|s| s.parse::<u64>().map_err(|_| "ERROR invalid_room_id".into()))
-}
-
-fn parse_next_string(words: &mut std::str::SplitN<'_, char>) -> Result<String, String> {
-    let token = words
-        .next()
-        .ok_or_else(|| String::from("ERROR missing_argument"))?;
-
-    if token.starts_with('"') {
-        if token.ends_with('"') && token.len() >= 2 {
-            return Ok(token[1..token.len() - 1].to_string());
-        }
-
-        let mut accum = token[1..].to_string();
-        while let Some(next) = words.next() {
-            if next.ends_with('"') {
-                accum.push(' ');
-                accum.push_str(&next[..next.len() - 1]);
-                return Ok(accum);
-            }
-            accum.push(' ');
-            accum.push_str(next);
-        }
-
-        return Err("ERROR invalid_argument".into());
+fn take_token(input: &str) -> Result<(String, &str), String> {
+    let input = input.trim_start();
+    if input.is_empty() {
+        return Err("ERROR missing_argument".into());
     }
 
-    Ok(token.to_string())
+    if input.starts_with('"') {
+        let mut buf = String::new();
+        let mut escaped = false;
+        let mut found_end = false;
+        for (i, c) in input[1..].char_indices() {
+            if escaped {
+                match c {
+                    '\\' => buf.push('\\'),
+                    '"' => buf.push('"'),
+                    'n' => buf.push('\n'),
+                    'r' => buf.push('\r'),
+                    't' => buf.push('\t'),
+                    other => buf.push(other),
+                }
+                escaped = false;
+                continue;
+            }
+
+            if c == '\\' {
+                escaped = true;
+                continue;
+            }
+
+            if c == '"' {
+                let end = 1 + i + c.len_utf8();
+                let rest = &input[end..];
+                return Ok((buf, rest));
+            }
+
+            buf.push(c);
+        }
+
+        Err("ERROR invalid_argument".into())
+    } else {
+        let mut end = input.len();
+        for (i, c) in input.char_indices() {
+            if c.is_whitespace() {
+                end = i;
+                break;
+            }
+        }
+        let token = input[..end].to_string();
+        let rest = &input[end..];
+        Ok((token, rest))
+    }
+}
+
+fn parse_room_id_from_remainder(remainder: &str) -> Result<(u64, &str), String> {
+    let (room_id, rest) = take_token(remainder)?;
+    let parsed = room_id
+        .parse::<u64>()
+        .map_err(|_| "ERROR invalid_room_id".to_string())?;
+    Ok((parsed, rest))
 }
 
 fn error_of(err: StateError) -> String {
@@ -302,7 +372,34 @@ mod tests {
         assert_eq!(updates.len(), 1);
 
         let (resp, _) = process_command("GET 1 public foo", &state).await;
-        assert!(resp.starts_with("OK null"));
+        assert_eq!(resp, "ERROR tombstone");
+    }
+
+    #[tokio::test]
+    async fn test_process_command_quoted_and_json_spaces() {
+        let state = sample_state();
+        process_command("ROOM.CREATE", &state).await;
+
+        let (resp, updates) = process_command("SET 1 \"my container\" \"complex key\" {\"a\": \"hello world\", \"b\": 123}", &state).await;
+        assert_eq!(resp, "OK");
+        assert_eq!(updates.len(), 1);
+
+        let (resp, _) = process_command("GET 1 \"my container\" \"complex key\"", &state).await;
+        assert!(resp.starts_with("OK {\"a\":\"hello world\",\"b\":123}"));
+    }
+
+    #[tokio::test]
+    async fn test_process_command_malformed_command() {
+        let state = sample_state();
+
+        let (resp, _) = process_command("ROOM.CREATE extra", &state).await;
+        assert_eq!(resp, "ERROR extra_arguments");
+
+        let (resp, _) = process_command("SET 1 public key", &state).await;
+        assert_eq!(resp, "ERROR missing_value");
+
+        let (resp, _) = process_command("SET 1 public key invalid_json", &state).await;
+        assert!(resp.starts_with("ERROR invalid_json"));
     }
 
     #[tokio::test]

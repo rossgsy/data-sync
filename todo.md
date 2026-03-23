@@ -11,9 +11,9 @@
 
 ## 2. Command protocol and parsing robustness
 
-- [ ] Improve `SET`/`DEL`/other text command token parsing to safely support JSON values with spaces, Unicode, and special chars. Current `splitn` + simple quote heuristics may break.
-- [ ] Reject malformed commands early with clearer `ERROR` messages.
-- [ ] Return distinct room-specific error codes for `GET` on tombstone vs missing key if intended.
+- [x] Improve `SET`/`DEL`/other text command token parsing to safely support JSON values with spaces, Unicode, and special chars. Current `splitn` + simple quote heuristics may break.
+- [x] Reject malformed commands early with clearer `ERROR` messages.
+- [x] Return distinct room-specific error codes for `GET` on tombstone vs missing key if intended.
 
 ## 3. Transaction semantics consistency
 

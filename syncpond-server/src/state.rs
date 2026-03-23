@@ -30,6 +30,7 @@ pub enum StateError {
     RoomNotFound,
     ContainerNotFound,
     FragmentNotFound,
+    FragmentTombstone,
     TxNotOpen,
     TxAlreadyOpen,
     JwtKeyNotConfigured,
@@ -42,6 +43,7 @@ impl std::fmt::Display for StateError {
             StateError::RoomNotFound => write!(f, "room_not_found"),
             StateError::ContainerNotFound => write!(f, "container_not_found"),
             StateError::FragmentNotFound => write!(f, "not_found"),
+            StateError::FragmentTombstone => write!(f, "tombstone"),
             StateError::TxNotOpen => write!(f, "tx_not_open"),
             StateError::TxAlreadyOpen => write!(f, "tx_already_open"),
             StateError::JwtKeyNotConfigured => write!(f, "jwt_key_not_configured"),
@@ -165,6 +167,10 @@ impl AppState {
             .get(container)
             .ok_or(StateError::ContainerNotFound)?;
         let fragment = container_map.get(key).ok_or(StateError::FragmentNotFound)?;
+
+        if fragment.value.is_null() {
+            return Err(StateError::FragmentTombstone);
+        }
 
         Ok((fragment.value.clone(), fragment.key_version))
     }
