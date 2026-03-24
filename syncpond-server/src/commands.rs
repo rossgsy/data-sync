@@ -11,6 +11,23 @@ pub struct RoomUpdate {
     pub room_counter: u64,
 }
 
+const MAX_COMMAND_CONTAINER_LEN: usize = 256;
+const MAX_COMMAND_KEY_LEN: usize = 256;
+
+fn validate_container_name(name: &str) -> Result<(), String> {
+    if name.len() > MAX_COMMAND_CONTAINER_LEN {
+        return Err("ERROR container_name_too_long".into());
+    }
+    Ok(())
+}
+
+fn validate_key_name(key: &str) -> Result<(), String> {
+    if key.len() > MAX_COMMAND_KEY_LEN {
+        return Err("ERROR key_too_long".into());
+    }
+    Ok(())
+}
+
 /// Process an incoming text command and return a response plus optional room updates.
 pub async fn process_command(line: &str, state: &SharedState) -> (String, Vec<RoomUpdate>) {
     let mut remainder = line.trim_start();
@@ -76,10 +93,16 @@ pub async fn process_command(line: &str, state: &SharedState) -> (String, Vec<Ro
                 Ok(x) => x,
                 Err(err) => return (err, vec![]),
             };
+            if let Err(e) = validate_container_name(&container) {
+                return (e, vec![]);
+            }
             let (key, rest) = match take_token(rest) {
                 Ok(x) => x,
                 Err(err) => return (err, vec![]),
             };
+            if let Err(e) = validate_key_name(&key) {
+                return (e, vec![]);
+            }
             let value_json = rest.trim_start();
             if value_json.is_empty() {
                 return ("ERROR missing_value".into(), vec![]);
@@ -119,10 +142,16 @@ pub async fn process_command(line: &str, state: &SharedState) -> (String, Vec<Ro
                 Ok(x) => x,
                 Err(err) => return (err, vec![]),
             };
+            if let Err(e) = validate_container_name(&container) {
+                return (e, vec![]);
+            }
             let (key, rest) = match take_token(rest) {
                 Ok(x) => x,
                 Err(err) => return (err, vec![]),
             };
+            if let Err(e) = validate_key_name(&key) {
+                return (e, vec![]);
+            }
             if !rest.trim().is_empty() {
                 return ("ERROR extra_arguments".into(), vec![]);
             }
@@ -157,10 +186,16 @@ pub async fn process_command(line: &str, state: &SharedState) -> (String, Vec<Ro
                 Ok(x) => x,
                 Err(err) => return (err, vec![]),
             };
+            if let Err(e) = validate_container_name(&container) {
+                return (e, vec![]);
+            }
             let (key, rest) = match take_token(rest) {
                 Ok(x) => x,
                 Err(err) => return (err, vec![]),
             };
+            if let Err(e) = validate_key_name(&key) {
+                return (e, vec![]);
+            }
             if !rest.trim().is_empty() {
                 return ("ERROR extra_arguments".into(), vec![]);
             }
@@ -348,7 +383,7 @@ mod tests {
 
     fn sample_state() -> SharedState {
         let mut app = AppState::new();
-        app.set_command_api_key("secret".to_string());
+        app.set_command_api_key("secret".to_string()).unwrap();
         Arc::new(RwLock::new(app))
     }
 
@@ -492,6 +527,29 @@ mod tests {
 
         let (resp, _) = process_command("TOKEN.GEN 1 public", &state).await;
         assert_eq!(resp, "ERROR jwt_key_not_configured");
+    }
+
+    #[tokio::test]
+    async fn test_set_container_key_length_limits() {
+        let state = sample_state();
+        process_command("ROOM.CREATE", &state).await;
+
+        let long_container = "a".repeat(MAX_COMMAND_CONTAINER_LEN + 1);
+        let cmd = format!("SET 1 {} key 10", long_container);
+        let (resp, _) = process_command(&cmd, &state).await;
+        assert_eq!(resp, "ERROR container_name_too_long");
+
+        let long_key = "k".repeat(MAX_COMMAND_KEY_LEN + 1);
+        let cmd = format!("SET 1 public {} 10", long_key);
+        let (resp, _) = process_command(&cmd, &state).await;
+        assert_eq!(resp, "ERROR key_too_long");
+    }
+
+    #[test]
+    fn test_command_api_key_invalid() {
+        let mut app = AppState::new();
+        let result = app.set_command_api_key("".to_string());
+        assert!(matches!(result, Err(StateError::CommandApiKeyInvalid)));
     }
 }
 

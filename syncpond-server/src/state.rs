@@ -54,6 +54,12 @@ pub enum StateError {
 
     /// JWT key is too weak.
     JwtKeyTooShort,
+
+    /// Command API key is not configured.
+    CommandApiKeyNotConfigured,
+
+    /// Command API key is blank/invalid.
+    CommandApiKeyInvalid,
 }
 
 impl std::fmt::Display for StateError {
@@ -68,6 +74,8 @@ impl std::fmt::Display for StateError {
             StateError::JwtKeyNotConfigured => write!(f, "jwt_key_not_configured"),
             StateError::JwtIssuerAudienceNotConfigured => write!(f, "jwt_issuer_audience_not_configured"),
             StateError::JwtKeyTooShort => write!(f, "jwt_key_too_short"),
+            StateError::CommandApiKeyNotConfigured => write!(f, "command_api_key_not_configured"),
+            StateError::CommandApiKeyInvalid => write!(f, "command_api_key_invalid"),
         }
     }
 }
@@ -87,6 +95,10 @@ pub struct AppState {
     pub ws_auth_success: u64,
     /// websocket auth failure count.
     pub ws_auth_failure: u64,
+    /// command auth failure count.
+    pub command_auth_failure: u64,
+    /// total commands that are invalid (parse/validation failure or unknown command).
+    pub invalid_command_count: u64,
     /// total accumulated ws connection lifetime latency (ns).
     pub ws_connection_latency_ns_total: u128,
     /// counter of ws connections that completed.
@@ -125,6 +137,8 @@ impl AppState {
             command_error_count: 0,
             ws_auth_success: 0,
             ws_auth_failure: 0,
+            command_auth_failure: 0,
+            invalid_command_count: 0,
             ws_connection_latency_ns_total: 0,
             ws_connection_count: 0,
             ws_update_dropped: 0,
@@ -274,6 +288,8 @@ impl AppState {
             "command_error_count": self.command_error_count,
             "ws_auth_success": self.ws_auth_success,
             "ws_auth_failure": self.ws_auth_failure,
+            "command_auth_failure": self.command_auth_failure,
+            "invalid_command_count": self.invalid_command_count,
             "ws_connection_count": self.ws_connection_count,
             "ws_connection_avg_latency_ms": if self.ws_connection_count > 0 {
                 (self.ws_connection_latency_ns_total as f64 / self.ws_connection_count as f64) / 1_000_000.0
@@ -307,8 +323,12 @@ impl AppState {
     }
 
     /// Set command API key required for command socket auth.
-    pub fn set_command_api_key(&mut self, key: String) {
+    pub fn set_command_api_key(&mut self, key: String) -> Result<(), StateError> {
+        if key.trim().is_empty() {
+            return Err(StateError::CommandApiKeyInvalid);
+        }
         self.command_api_key = Some(key);
+        Ok(())
     }
 
     /// Generate a JWT for a room with granted containers.

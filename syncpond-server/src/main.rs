@@ -1,4 +1,9 @@
 //! syncpond-server is a small real-time room/key sync server with command/WS APIs.
+//!
+//! Security assumptions:
+//! - `require_tls` requires TLS termination to be handled by an external proxy (nginx/Caddy/traefik).
+//! - The command API socket is sensitive and should be bound to loopback or private network.
+//! - Command API key and JWT signing keys must be provisioned securely and rotated out of band.
 #![deny(missing_docs)]
 
 mod commands;
@@ -55,7 +60,9 @@ async fn main() -> Result<()> {
     let config: SyncpondConfig = serde_yaml::from_str(&config_text)?;
 
     let mut base_state = AppState::new();
-    base_state.set_command_api_key(config.command_api_key.clone());
+    base_state
+        .set_command_api_key(config.command_api_key.clone())
+        .context("command_api_key must be configured and non-empty")?;
     if let Some(jwt) = config.jwt_key.clone() {
         base_state.set_jwt_key(jwt);
     }
@@ -397,11 +404,19 @@ async fn handle_command_connection(
 
     if let Some(expected_key) = expected_key {
         if !constant_time_eq(provided_key, &expected_key) {
+            {
+                let mut app = state.write().await;
+                app.command_auth_failure = app.command_auth_failure.saturating_add(1);
+            }
             writer.write_all(b"ERROR invalid_api_key\n").await?;
             writer.flush().await?;
             return Ok(());
         }
     } else {
+        {
+            let mut app = state.write().await;
+            app.command_auth_failure = app.command_auth_failure.saturating_add(1);
+        }
         writer.write_all(b"ERROR api_key_not_configured\n").await?;
         writer.flush().await?;
         return Ok(());
@@ -411,10 +426,12 @@ async fn handle_command_connection(
         line.clear();
         let bytes = match read_line_with_limit(&mut reader, &mut line).await {
             Ok(n) => n,
-            Err(err) => {
-                let msg = format!("ERROR {}\n", err);
+            Err(_) => {
+                let msg = "ERROR malformed_request\n";
                 writer.write_all(msg.as_bytes()).await?;
                 writer.flush().await?;
+                let mut app = state.write().await;
+                app.invalid_command_count = app.invalid_command_count.saturating_add(1);
                 return Ok(());
             }
         };
@@ -437,6 +454,9 @@ async fn handle_command_connection(
         if resp.starts_with("ERROR") {
             let mut app = state.write().await;
             app.command_error_count = app.command_error_count.saturating_add(1);
+            if resp.starts_with("ERROR invalid_") || resp == "ERROR unknown_command" || resp == "ERROR missing_argument" {
+                app.invalid_command_count = app.invalid_command_count.saturating_add(1);
+            }
         }
         writer.write_all(resp.as_bytes()).await?;
         writer.write_all(b"\n").await?;
