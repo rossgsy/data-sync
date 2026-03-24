@@ -45,6 +45,6 @@
 
 ## 8. Documentation
 
-- [ ] Document protocol commands and channels in README (command wire format, JWT claim requirements, grant scope semantics).
-- [ ] Document configuration defaults (`ws_addr`, `command_addr`, `health_addr`, `command_api_key`, etc.) and recommended security posture.
+- [x] Document protocol commands and channels in README (command wire format, JWT claim requirements, grant scope semantics).
+- [x] Document configuration defaults (`ws_addr`, `command_addr`, `health_addr`, `command_api_key`, etc.) and recommended security posture.
 
