@@ -561,7 +561,7 @@ mod tests {
     async fn test_command_ws_integration_flow() {
         use crate::commands::process_command;
         let mut app = AppState::new();
-        app.set_command_api_key("secret".to_string());
+        app.set_command_api_key("secret".to_string()).unwrap();
 
         let state = Arc::new(RwLock::new(app));
 

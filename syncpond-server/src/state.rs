@@ -55,9 +55,6 @@ pub enum StateError {
     /// JWT key is too weak.
     JwtKeyTooShort,
 
-    /// Command API key is not configured.
-    CommandApiKeyNotConfigured,
-
     /// Command API key is blank/invalid.
     CommandApiKeyInvalid,
 }
@@ -74,7 +71,6 @@ impl std::fmt::Display for StateError {
             StateError::JwtKeyNotConfigured => write!(f, "jwt_key_not_configured"),
             StateError::JwtIssuerAudienceNotConfigured => write!(f, "jwt_issuer_audience_not_configured"),
             StateError::JwtKeyTooShort => write!(f, "jwt_key_too_short"),
-            StateError::CommandApiKeyNotConfigured => write!(f, "command_api_key_not_configured"),
             StateError::CommandApiKeyInvalid => write!(f, "command_api_key_invalid"),
         }
     }
@@ -472,6 +468,7 @@ impl AppState {
     }
 
     /// Get room delta updates since a specified version for allowed containers.
+    #[allow(dead_code)]
     pub fn room_delta(
         &self,
         room_id: u64,

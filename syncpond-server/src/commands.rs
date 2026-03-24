@@ -111,7 +111,7 @@ pub async fn process_command(line: &str, state: &SharedState) -> (String, Vec<Ro
                 Ok(v) => v,
                 Err(err) => return (format!("ERROR invalid_json {}", err), vec![]),
             };
-            let mut app = state.write().await;
+            let app = state.write().await;
             match app.set_fragment(room_id, container.clone(), key.clone(), value.clone()) {
                 Ok(()) => {
                     let room_counter = app
@@ -155,7 +155,7 @@ pub async fn process_command(line: &str, state: &SharedState) -> (String, Vec<Ro
             if !rest.trim().is_empty() {
                 return ("ERROR extra_arguments".into(), vec![]);
             }
-            let mut app = state.write().await;
+            let app = state.write().await;
             match app.del_fragment(room_id, container.clone(), key.clone()) {
                 Ok(()) => {
                     let room_counter = app
@@ -242,7 +242,7 @@ pub async fn process_command(line: &str, state: &SharedState) -> (String, Vec<Ro
             if !rest.trim().is_empty() {
                 return ("ERROR extra_arguments".into(), vec![]);
             }
-            let mut app = state.write().await;
+            let app = state.write().await;
             match app.tx_begin(room_id) {
                 Ok(()) => ("OK".into(), vec![]),
                 Err(e) => (error_of(e), vec![]),
@@ -256,7 +256,7 @@ pub async fn process_command(line: &str, state: &SharedState) -> (String, Vec<Ro
             if !rest.trim().is_empty() {
                 return ("ERROR extra_arguments".into(), vec![]);
             }
-            let mut app = state.write().await;
+            let app = state.write().await;
             match app.tx_end(room_id) {
                 Ok(()) => {
                     let room_counter = app.room_version(room_id).unwrap_or(0);
@@ -273,7 +273,7 @@ pub async fn process_command(line: &str, state: &SharedState) -> (String, Vec<Ro
             if !rest.trim().is_empty() {
                 return ("ERROR extra_arguments".into(), vec![]);
             }
-            let mut app = state.write().await;
+            let app = state.write().await;
             match app.tx_abort(room_id) {
                 Ok(()) => ("OK".into(), vec![]),
                 Err(e) => (error_of(e), vec![]),
@@ -318,7 +318,6 @@ fn take_token(input: &str) -> Result<(String, &str), String> {
     if input.starts_with('"') {
         let mut buf = String::new();
         let mut escaped = false;
-        let mut found_end = false;
         for (i, c) in input[1..].char_indices() {
             if escaped {
                 match c {
