@@ -18,11 +18,15 @@ use uuid::Uuid;
 const MAX_WS_CLIENTS_PER_ROOM: usize = 200;
 const MAX_WS_PENDING_MESSAGES: usize = 256;
 
+/// Per-client subscription and outbound channel info.
 pub struct ClientInfo {
+    /// Containers the client has authorization for.
     pub allowed_containers: HashSet<String>,
+    /// Sender for room update events.
     pub sender: mpsc::Sender<Value>,
 }
 
+/// Manages active websocket clients per room.
 pub struct WsHub {
     rooms: HashMap<u64, HashMap<Uuid, ClientInfo>>,
 }
@@ -34,6 +38,7 @@ impl WsHub {
         }
     }
 
+    /// Add a client to the room hub if room size limits allow.
     pub fn add_client(&mut self, room_id: u64, client_id: Uuid, client: ClientInfo) -> Result<(), &'static str> {
         let room_clients = self.rooms.entry(room_id).or_insert_with(HashMap::new);
         if room_clients.len() >= MAX_WS_CLIENTS_PER_ROOM {
@@ -43,6 +48,7 @@ impl WsHub {
         Ok(())
     }
 
+    /// Remove a client from a room.
     pub fn remove_client(&mut self, room_id: u64, client_id: &Uuid) {
         if let Some(room_clients) = self.rooms.get_mut(&room_id) {
             room_clients.remove(client_id);
@@ -52,11 +58,13 @@ impl WsHub {
         }
     }
 
+    /// Remove a room and all attached clients from the hub (cleanup room deletion).
     pub fn remove_room(&mut self, room_id: u64) {
         self.rooms.remove(&room_id);
     }
 
-    pub async fn broadcast_update(
+    /// Broadcast a room update event to interested WS clients with per-client backpressure protection.
+pub async fn broadcast_update(
     &mut self,
     update: RoomUpdate,
     ws_update_rate_limiter: &RateLimiter,
@@ -184,6 +192,7 @@ fn validate_jwt_claims(app: &AppState, token: &str) -> Result<Claims, String> {
     Ok(claims)
 }
 
+/// Handle an incoming websocket client connection, auth, and event routing.
 pub async fn handle_ws_connection(
     stream: TcpStream,
     peer: SocketAddr,

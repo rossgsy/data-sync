@@ -1,3 +1,6 @@
+//! syncpond-server is a small real-time room/key sync server with command/WS APIs.
+#![deny(missing_docs)]
+
 mod commands;
 mod rate_limiter;
 mod state;

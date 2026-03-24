@@ -25,15 +25,31 @@ pub enum RoomCommand {
     Del { container: String, key: String },
 }
 
+/// Error conditions used by application state operations.
 #[derive(Debug)]
 pub enum StateError {
+    /// Room was not found.
     RoomNotFound,
+
+    /// Container was not found.
     ContainerNotFound,
+
+    /// Fragment/key was not found.
     FragmentNotFound,
+
+    /// Fragment/key was deleted (tombstoned).
     FragmentTombstone,
+
+    /// Transaction was not open.
     TxNotOpen,
+
+    /// Transaction is already open.
     TxAlreadyOpen,
+
+    /// JWT key is not configured.
     JwtKeyNotConfigured,
+
+    /// JWT issuer/audience is not configured.
     JwtIssuerAudienceNotConfigured,
 }
 
@@ -54,18 +70,30 @@ impl std::fmt::Display for StateError {
 
 impl std::error::Error for StateError {}
 
+/// Shared application state and counters.
 #[derive(Debug)]
 pub struct AppState {
+    /// active websocket connections currently open.
     pub total_ws_connections: usize,
+    /// total commands processed.
     pub total_command_requests: u64,
+    /// total commands that returned an error.
     pub command_error_count: u64,
+    /// websocket auth success count.
     pub ws_auth_success: u64,
+    /// websocket auth failure count.
     pub ws_auth_failure: u64,
+    /// total accumulated ws connection lifetime latency (ns).
     pub ws_connection_latency_ns_total: u128,
+    /// counter of ws connections that completed.
     pub ws_connection_count: u64,
+    /// number of ws updates dropped due to queue full.
     pub ws_update_dropped: u64,
+    /// number of ws updates dropped due rate limit.
     pub ws_update_rate_limited: u64,
+    /// number of ws send errors.
     pub ws_send_errors: u64,
+    /// in-memory rooms map.
     pub rooms: HashMap<u64, Arc<StdRwLock<RoomState>>>,
     pub next_room_id: u64,
     pub jwt_key: Option<String>,
@@ -77,6 +105,7 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// Create a new empty app state with default values.
     pub fn new() -> Self {
         Self {
             total_ws_connections: 0,
@@ -100,6 +129,7 @@ impl AppState {
         }
     }
 
+    /// Create and return a new room ID.
     pub fn create_room(&mut self) -> u64 {
         let room_id = self.next_room_id;
         self.next_room_id += 1;
@@ -114,6 +144,7 @@ impl AppState {
         room_id
     }
 
+    /// Delete a room by ID.
     pub fn delete_room(&mut self, room_id: u64) -> Result<(), StateError> {
         if self.rooms.remove(&room_id).is_some() {
             Ok(())
@@ -122,6 +153,7 @@ impl AppState {
         }
     }
 
+    /// Set a fragment value in a container within a room.
     pub fn set_fragment(
         &self,
         room_id: u64,
@@ -151,6 +183,7 @@ impl AppState {
         Ok(())
     }
 
+    /// Delete (tombstone) a fragment key in a room container.
     pub fn del_fragment(&self, room_id: u64, container: String, key: String) -> Result<(), StateError> {
         let room_arc = self.rooms.get(&room_id).ok_or(StateError::RoomNotFound)?;
         let mut room = room_arc.write().map_err(|_| StateError::RoomNotFound)?;
@@ -177,6 +210,7 @@ impl AppState {
         Ok(())
     }
 
+    /// Get fragment value and version for a given key in room/container.
     pub fn get_fragment(&self, room_id: u64, container: &str, key: &str) -> Result<(Value, u64), StateError> {
         let room_arc = self.rooms.get(&room_id).ok_or(StateError::RoomNotFound)?;
         let room = room_arc.read().map_err(|_| StateError::RoomNotFound)?;
@@ -193,18 +227,21 @@ impl AppState {
         Ok((fragment.value.clone(), fragment.key_version))
     }
 
+    /// Get the room version counter for the specified room.
     pub fn room_version(&self, room_id: u64) -> Result<u64, StateError> {
         let room_arc = self.rooms.get(&room_id).ok_or(StateError::RoomNotFound)?;
         let room = room_arc.read().map_err(|_| StateError::RoomNotFound)?;
         Ok(room.room_counter)
     }
 
+    /// List existing room IDs.
     pub fn list_rooms(&self) -> Vec<u64> {
         let mut ids: Vec<u64> = self.rooms.keys().copied().collect();
         ids.sort_unstable();
         ids
     }
 
+    /// Get metadata and counters for a room.
     pub fn room_info(&self, room_id: u64) -> Result<serde_json::Value, StateError> {
         let room_arc = self.rooms.get(&room_id).ok_or(StateError::RoomNotFound)?;
         let room = room_arc.read().map_err(|_| StateError::RoomNotFound)?;
@@ -220,6 +257,7 @@ impl AppState {
         }))
     }
 
+    /// Serialize internal metrics in JSON for health endpoint metrics scraping.
     pub fn metrics(&self) -> serde_json::Value {
         let room_count = self.rooms.len();
         let ws_connections = self.total_ws_connections;
@@ -244,26 +282,32 @@ impl AppState {
         })
     }
 
+    /// Set JWT signing key used for token creation and validation.
     pub fn set_jwt_key(&mut self, key: String) {
         self.jwt_key = Some(key);
     }
 
+    /// Set JWT expiration TTL in seconds.
     pub fn set_jwt_ttl(&mut self, seconds: u64) {
         self.jwt_ttl_seconds = seconds;
     }
 
+    /// Set JWT issuer claim for generated tokens.
     pub fn set_jwt_issuer(&mut self, issuer: String) {
         self.jwt_issuer = Some(issuer);
     }
 
+    /// Set JWT audience claim for generated tokens.
     pub fn set_jwt_audience(&mut self, audience: String) {
         self.jwt_audience = Some(audience);
     }
 
+    /// Set command API key required for command socket auth.
     pub fn set_command_api_key(&mut self, key: String) {
         self.command_api_key = Some(key);
     }
 
+    /// Generate a JWT for a room with granted containers.
     pub fn create_room_token(&self, room_id: u64, containers: &[String]) -> Result<String, StateError> {
         let key = self.jwt_key.as_ref().ok_or(StateError::JwtKeyNotConfigured)?;
 
@@ -319,6 +363,7 @@ impl AppState {
             .map_err(|_| StateError::JwtKeyNotConfigured)
     }
 
+    /// Begin a transaction for a room, buffering subsequent SET/DEL operations.
     pub fn tx_begin(&self, room_id: u64) -> Result<(), StateError> {
         let room_arc = self.rooms.get(&room_id).ok_or(StateError::RoomNotFound)?;
         let mut room = room_arc.write().map_err(|_| StateError::RoomNotFound)?;
@@ -329,6 +374,7 @@ impl AppState {
         Ok(())
     }
 
+    /// Commit a room transaction, applying buffered operations.
     pub fn tx_end(&self, room_id: u64) -> Result<(), StateError> {
         let room_arc = self.rooms.get(&room_id).ok_or(StateError::RoomNotFound)?;
         let mut room = room_arc.write().map_err(|_| StateError::RoomNotFound)?;
@@ -368,6 +414,7 @@ impl AppState {
         Ok(())
     }
 
+    /// Abort a room transaction, discarding buffered operations.
     pub fn tx_abort(&self, room_id: u64) -> Result<(), StateError> {
         let room_arc = self.rooms.get(&room_id).ok_or(StateError::RoomNotFound)?;
         let mut room = room_arc.write().map_err(|_| StateError::RoomNotFound)?;
@@ -375,6 +422,7 @@ impl AppState {
         Ok(())
     }
 
+    /// Get a snapshot of room state for allowed containers.
     pub fn room_snapshot(&self, room_id: u64, allowed_containers: &std::collections::HashSet<String>) -> Option<serde_json::Value> {
         let room_arc = self.rooms.get(&room_id)?;
         let room = room_arc.read().ok()?;
@@ -396,6 +444,7 @@ impl AppState {
         }))
     }
 
+    /// Get room delta updates since a specified version for allowed containers.
     pub fn room_delta(
         &self,
         room_id: u64,
