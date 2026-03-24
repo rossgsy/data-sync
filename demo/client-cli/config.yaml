@@ -2,6 +2,6 @@
 # ws_addr is the websocket endpoint of syncpond-server
 # jwt is the authentication token to use for the client
 ws_addr: wss://syncpond.lab-2.paleglyph.com
-jwt:  eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJyb29tOjEiLCJyb29tIjoiMSIsImNvbnRhaW5lcnMiOlsicHVibGljIl0sImV4cCI6MTc3NDI4MTMwOX0.4-bTG_WatVI2hr2bj857ROTMAr1Oi_OXt3g2XOhWRB4
+jwt: eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJyb29tOjEiLCJyb29tIjoiMSIsImNvbnRhaW5lcnMiOlsicHVibGljIl0sImV4cCI6MTc3NDMxNjc3NywiaXNzIjoic3luY3BvbmQtc2VydmVyIiwiYXVkIjoic3luY3BvbmQifQ.lZDkq9-vai9H880SIQNFiE3hrvg3tTtHyqQ9B1gqQZs
 # optional: last_seen_counter to resume from a known version
 last_seen_counter: 0

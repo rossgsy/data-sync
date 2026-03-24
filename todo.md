@@ -2,29 +2,6 @@
 
 This todo file captures code quality, security, and robustness recommendations for `syncpond-server`.
 
-## 1. Security hardening
-
-1.1. Use constant-time API key comparison
-- File: `src/main.rs` `handle_command_connection`
-- Issue: `provided_key != expected_key` is direct equality. For protection against timing attacks on remote API key checks, compare using constant-time `subtle::ConstantTimeEq` (or equivalent).
-
-1.2. Improve JWT claim validation
-- File: `src/ws.rs` `validate_jwt_claims`
-- Issue: `room` claim is parsed after decode, but `sub` is ignored. Enforce `sub` matches `room` or expected pattern, to reduce risk of overly broad tokens.
-- Issue: issuer/audience are optional in config; if configured, they are validated, but do not require `sub`.
-
-1.3. Reject expired or low-entropy JWTs proactively
-- File: `src/ws.rs` and `src/state.rs` `create_room_token`
-- Issue: JWT uses `HS256` with shared key; encourage fleshing out `jwt_key` policy and minimum length (e.g., at least 32 bytes) and 2FA methods for management.
-
-1.4. Authorization/logging of command failures with rate limit
-- File: `src/main.rs` `handle_command_connection`
-- Issue: API key failure returns `ERROR invalid_api_key` but still in one request; a failed attempt still counts inside connection. Add per-IP key failure rate limiting to avoid forced disconnection by repeated invalid auth.
-
-1.5. Websocket upgrade origin checks (WSS proxy support)
-- File: `src/ws.rs` `handle_ws_connection`
-- Issue: no Origin/CORS checks; consider verifying `Host` or origin header in scenario hosting public ws endpoints.
-
 ## 2. Robustness and resource control
 
 2.1. Rate limiter key explosion and memory limits
