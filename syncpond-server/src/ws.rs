@@ -6,7 +6,7 @@ use futures_util::{SinkExt, StreamExt};
 use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::{collections::{HashMap, HashSet}, net::SocketAddr, sync::Arc, time::{SystemTime, UNIX_EPOCH}};
+use std::{collections::{HashMap, HashSet}, net::SocketAddr, sync::Arc, time::{Duration, Instant, SystemTime, UNIX_EPOCH}};
 use tokio::{
     net::TcpStream,
     sync::{mpsc, Mutex},
@@ -15,9 +15,12 @@ use tokio_tungstenite::tungstenite::Message;
 use tracing::{error, info};
 use uuid::Uuid;
 
+const MAX_WS_CLIENTS_PER_ROOM: usize = 200;
+const MAX_WS_PENDING_MESSAGES: usize = 256;
+
 pub struct ClientInfo {
     pub allowed_containers: HashSet<String>,
-    pub sender: mpsc::UnboundedSender<Value>,
+    pub sender: mpsc::Sender<Value>,
 }
 
 pub struct WsHub {
@@ -31,11 +34,13 @@ impl WsHub {
         }
     }
 
-    pub fn add_client(&mut self, room_id: u64, client_id: Uuid, client: ClientInfo) {
-        self.rooms
-            .entry(room_id)
-            .or_insert_with(HashMap::new)
-            .insert(client_id, client);
+    pub fn add_client(&mut self, room_id: u64, client_id: Uuid, client: ClientInfo) -> Result<(), &'static str> {
+        let room_clients = self.rooms.entry(room_id).or_insert_with(HashMap::new);
+        if room_clients.len() >= MAX_WS_CLIENTS_PER_ROOM {
+            return Err("room_client_limit_exceeded");
+        }
+        room_clients.insert(client_id, client);
+        Ok(())
     }
 
     pub fn remove_client(&mut self, room_id: u64, client_id: &Uuid) {
@@ -47,7 +52,17 @@ impl WsHub {
         }
     }
 
-    pub async fn broadcast_update(&mut self, update: RoomUpdate) {
+    pub fn remove_room(&mut self, room_id: u64) {
+        self.rooms.remove(&room_id);
+    }
+
+    pub async fn broadcast_update(
+    &mut self,
+    update: RoomUpdate,
+    ws_update_rate_limiter: &RateLimiter,
+    ws_update_rate_limit: usize,
+    ws_update_rate_window_secs: u64,
+) {
         let event = if update.container == "*" && update.key == "*" {
             json!({
                 "type": "room_update",
@@ -74,21 +89,50 @@ impl WsHub {
             })
         };
 
-        let senders: Vec<_> = match self.rooms.get(&update.room_id) {
-            Some(room_clients) => room_clients
-                .values()
-                .filter(|client| {
-                    update.container == "*"
-                        || update.container == "public"
-                        || client.allowed_containers.contains(&update.container)
-                })
-                .map(|client| client.sender.clone())
-                .collect(),
+        let room_clients = match self.rooms.get_mut(&update.room_id) {
+            Some(room_clients) => room_clients,
             None => return,
         };
 
-        for sender in senders {
-            let _ = sender.send(event.clone());
+        let mut disconnected = Vec::new();
+
+        for (client_id, client) in room_clients.iter() {
+            if update.container != "*"
+                && update.container != "public"
+                && !client.allowed_containers.contains(&update.container)
+            {
+                continue;
+            }
+
+            let client_key = format!("{}:{}", update.room_id, client_id);
+            if !ws_update_rate_limiter
+                .allow(&client_key, ws_update_rate_limit, Duration::from_secs(ws_update_rate_window_secs))
+                .await
+            {
+                error!(room_id = update.room_id, client = ?client_id, "ws client update rate limited, dropping client");
+                disconnected.push(*client_id);
+                continue;
+            }
+
+            if let Err(err) = client.sender.try_send(event.clone()) {
+                match err {
+                    mpsc::error::TrySendError::Full(_) => {
+                        error!(room_id = update.room_id, client = ?client_id, "ws client queue full, dropping client");
+                        disconnected.push(*client_id);
+                    }
+                    mpsc::error::TrySendError::Closed(_) => {
+                        disconnected.push(*client_id);
+                    }
+                }
+            }
+        }
+
+        for client_id in disconnected {
+            room_clients.remove(&client_id);
+        }
+
+        if room_clients.is_empty() {
+            self.rooms.remove(&update.room_id);
         }
     }
 }
@@ -109,8 +153,6 @@ pub struct AuthMessage {
     pub last_seen_counter: Option<u64>,
 }
 
-const WS_AUTH_LIMIT: usize = 10;
-const WS_AUTH_WINDOW_SECS: u64 = 60;
 
 fn validate_jwt_claims(app: &AppState, token: &str) -> Result<Claims, String> {
     let jwt_key = app
@@ -147,17 +189,24 @@ pub async fn handle_ws_connection(
     peer: SocketAddr,
     state: SharedState,
     ws_hub: Arc<Mutex<WsHub>>,
-    rate_limiter: Arc<RateLimiter>,
+    auth_rate_limiter: Arc<RateLimiter>,
+    _ws_update_rate_limiter: Arc<RateLimiter>,
+    _ws_room_rate_limiter: Arc<RateLimiter>,
+    ws_auth_rate_limit: usize,
+    ws_auth_rate_window_secs: u64,
+    _ws_update_rate_limit: usize,
+    _ws_update_rate_window_secs: u64,
 ) -> Result<()> {
     let key = peer.ip().to_string();
-    let allowed = rate_limiter
-        .allow(&key, WS_AUTH_LIMIT, std::time::Duration::from_secs(WS_AUTH_WINDOW_SECS))
+    let allowed = auth_rate_limiter
+        .allow(&key, ws_auth_rate_limit, Duration::from_secs(ws_auth_rate_window_secs))
         .await;
     if !allowed {
         info!(%peer, "ws auth rate limit exceeded");
         return Ok(());
     }
 
+    let connection_start = Instant::now();
     let ws_stream = tokio_tungstenite::accept_async(stream).await?;
     info!(%peer, "websocket connection established");
 
@@ -166,6 +215,8 @@ pub async fn handle_ws_connection(
     let auth_text = match ws_receiver.next().await {
         Some(Ok(Message::Text(txt))) => txt,
         Some(Ok(_)) => {
+            let mut app = state.write().await;
+            app.ws_auth_failure += 1;
             let err = json!({"type":"auth_error","reason":"invalid_auth_message"});
             ws_sender.send(Message::Text(err.to_string())).await.ok();
             return Ok(());
@@ -177,6 +228,8 @@ pub async fn handle_ws_connection(
     let auth_msg: AuthMessage = match serde_json::from_str(&auth_text) {
         Ok(v) => v,
         Err(_) => {
+            let mut app = state.write().await;
+            app.ws_auth_failure += 1;
             let err = json!({"type":"auth_error","reason":"invalid_json"});
             ws_sender.send(Message::Text(err.to_string())).await.ok();
             return Ok(());
@@ -184,16 +237,24 @@ pub async fn handle_ws_connection(
     };
 
     if auth_msg.typ != "auth" {
+        let mut app = state.write().await;
+        app.ws_auth_failure += 1;
         let err = json!({"type":"auth_error","reason":"missing_auth"});
         ws_sender.send(Message::Text(err.to_string())).await.ok();
         return Ok(());
     }
 
     let app = state.read().await;
-
     let claims = match validate_jwt_claims(&app, &auth_msg.jwt) {
-        Ok(claims) => claims,
+        Ok(claims) => {
+            // auth success counter
+            let mut app = state.write().await;
+            app.ws_auth_success += 1;
+            claims
+        }
         Err(reason) => {
+            let mut app = state.write().await;
+            app.ws_auth_failure += 1;
             let err = json!({"type":"auth_error","reason":"invalid_jwt","detail": reason});
             ws_sender.send(Message::Text(err.to_string())).await.ok();
             return Ok(());
@@ -242,19 +303,29 @@ pub async fn handle_ws_connection(
 
     ws_sender.send(Message::Text(auth_ok.to_string())).await?;
 
-    let (tx, mut rx) = mpsc::unbounded_channel();
+    let (tx, mut rx) = mpsc::channel::<Value>(MAX_WS_PENDING_MESSAGES);
     let client_id = Uuid::new_v4();
 
     {
         let mut hub = ws_hub.lock().await;
-        hub.add_client(
+        if let Err(reason) = hub.add_client(
             room_id,
             client_id,
             ClientInfo {
                 allowed_containers: allowed_containers.clone(),
                 sender: tx,
             },
-        );
+        ) {
+            let err = json!({"type":"auth_error","reason":reason});
+            ws_sender.send(Message::Text(err.to_string())).await.ok();
+            return Ok(());
+        }
+    }
+
+    {
+        let mut app = state.write().await;
+        app.total_ws_connections = app.total_ws_connections.saturating_add(1);
+        info!(total_ws_connections = app.total_ws_connections, "ws connections after auth");
     }
 
     loop {
@@ -305,7 +376,10 @@ pub async fn handle_ws_connection(
     {
         let mut app = state.write().await;
         app.total_ws_connections = app.total_ws_connections.saturating_sub(1);
-        info!(total_ws_connections = app.total_ws_connections, "ws connections after close");
+        let elapsed_ns = connection_start.elapsed().as_nanos();
+        app.ws_connection_latency_ns_total = app.ws_connection_latency_ns_total.saturating_add(elapsed_ns);
+        app.ws_connection_count += 1;
+        info!(total_ws_connections = app.total_ws_connections, ws_connection_elapsed_ms = elapsed_ns as f64 / 1_000_000.0, "ws connections after close");
     }
 
     Ok(())
@@ -318,6 +392,7 @@ mod tests {
     use jsonwebtoken::{encode, Header};
     use serde::Serialize;
     use std::time::{SystemTime, UNIX_EPOCH};
+    use tokio::sync::{mpsc, RwLock};
 
     #[derive(Debug, Serialize)]
     struct IncompleteClaims {
@@ -381,5 +456,53 @@ mod tests {
         let token = encode(&Header::default(), &claims, &jsonwebtoken::EncodingKey::from_secret("secret".as_ref())).unwrap();
         let err = validate_jwt_claims(&app, &token).unwrap_err();
         assert!(err.contains("invalid_jwt"));
+    }
+
+    #[tokio::test]
+    async fn test_ws_hub_room_deletion_cleanup() {
+        let mut hub = WsHub::new();
+        let mut allowed = HashSet::new();
+        allowed.insert("public".to_string());
+
+        let (tx, _rx) = mpsc::channel::<Value>(1);
+        let client_id = Uuid::new_v4();
+        hub.add_client(123, client_id, ClientInfo { allowed_containers: allowed.clone(), sender: tx }).expect("add client");
+        assert!(hub.rooms.contains_key(&123));
+
+        hub.remove_room(123);
+        assert!(!hub.rooms.contains_key(&123));
+    }
+
+    #[tokio::test]
+    async fn test_command_ws_integration_flow() {
+        use crate::commands::process_command;
+        let mut app = AppState::new();
+        app.set_command_api_key("secret".to_string());
+
+        let state = Arc::new(RwLock::new(app));
+
+        let (resp, _) = process_command("ROOM.CREATE", &state).await;
+        assert!(resp.starts_with("OK"));
+
+        let (resp, updates) = process_command("SET 1 public foo 10", &state).await;
+        assert_eq!(resp, "OK");
+        assert_eq!(updates.len(), 1);
+
+        let mut hub = WsHub::new();
+        let mut allowed = HashSet::new();
+        allowed.insert("public".to_string());
+        let (tx, mut rx) = mpsc::channel::<Value>(3);
+        hub.add_client(1, Uuid::new_v4(), ClientInfo { allowed_containers: allowed, sender: tx }).unwrap();
+
+        hub.broadcast_update(
+            updates.into_iter().next().unwrap(),
+            &RateLimiter::new(),
+            100,
+            60,
+        )
+        .await;
+
+        let update_msg = rx.recv().await.expect("should receive event");
+        assert!(update_msg.get("room_id").is_some());
     }
 }

@@ -30,6 +30,14 @@ struct SyncpondConfig {
     jwt_ttl_seconds: Option<u64>,
     require_tls: Option<bool>,
     health_bind_loopback_only: Option<bool>,
+    command_rate_limit: Option<usize>,
+    command_rate_window_secs: Option<u64>,
+    ws_auth_rate_limit: Option<usize>,
+    ws_auth_rate_window_secs: Option<u64>,
+    ws_update_rate_limit: Option<usize>,
+    ws_update_rate_window_secs: Option<u64>,
+    ws_room_rate_limit: Option<usize>,
+    ws_room_rate_window_secs: Option<u64>,
 }
 
 #[tokio::main]
@@ -57,8 +65,24 @@ async fn main() -> Result<()> {
 
     let shared_state = Arc::new(RwLock::new(base_state));
     let ws_hub = Arc::new(Mutex::new(WsHub::new()));
-    let ws_rate_limiter = Arc::new(RateLimiter::new());
+    let ws_auth_rate_limiter = Arc::new(RateLimiter::new());
+    let ws_update_rate_limiter = Arc::new(RateLimiter::new());
+    let ws_room_rate_limiter = Arc::new(RateLimiter::new());
     let command_rate_limiter = Arc::new(RateLimiter::new());
+
+    let ws_update_rate_limiter_for_ws = ws_update_rate_limiter.clone();
+    let ws_update_rate_limiter_for_cmd = ws_update_rate_limiter.clone();
+    let ws_room_rate_limiter_for_ws = ws_room_rate_limiter.clone();
+    let ws_room_rate_limiter_for_cmd = ws_room_rate_limiter.clone();
+
+    let cmd_rate_limit = config.command_rate_limit.unwrap_or(DEFAULT_CMD_RATE_LIMIT);
+    let cmd_rate_window_secs = config.command_rate_window_secs.unwrap_or(DEFAULT_CMD_RATE_WINDOW_SECS);
+    let ws_auth_rate_limit = config.ws_auth_rate_limit.unwrap_or(DEFAULT_WS_AUTH_RATE_LIMIT);
+    let ws_auth_rate_window_secs = config.ws_auth_rate_window_secs.unwrap_or(DEFAULT_WS_AUTH_RATE_WINDOW_SECS);
+    let ws_update_rate_limit = config.ws_update_rate_limit.unwrap_or(DEFAULT_WS_UPDATE_RATE_LIMIT);
+    let ws_update_rate_window_secs = config.ws_update_rate_window_secs.unwrap_or(DEFAULT_WS_UPDATE_RATE_WINDOW_SECS);
+    let ws_room_rate_limit = config.ws_room_rate_limit.unwrap_or(DEFAULT_WS_ROOM_RATE_LIMIT);
+    let ws_room_rate_window_secs = config.ws_room_rate_window_secs.unwrap_or(DEFAULT_WS_ROOM_RATE_WINDOW_SECS);
 
     if config.command_api_key.trim().is_empty() {
         anyhow::bail!("command_api_key must be configured and non-empty");
@@ -90,7 +114,6 @@ async fn main() -> Result<()> {
 
     let ws_state = shared_state.clone();
     let ws_hub_for_ws = ws_hub.clone();
-    let ws_rate_limiter_for_ws = ws_rate_limiter.clone();
     let command_state = shared_state.clone();
     let ws_hub_for_cmd = ws_hub.clone();
     let command_rate_limiter_for_cmd = command_rate_limiter.clone();
@@ -106,9 +129,25 @@ async fn main() -> Result<()> {
             let (stream, peer) = listener.accept().await?;
             let state = ws_state.clone();
             let hub = ws_hub_for_ws.clone();
-            let rate_limiter = ws_rate_limiter_for_ws.clone();
+            let auth_limiter = ws_auth_rate_limiter.clone();
+            let update_limiter = ws_update_rate_limiter_for_ws.clone();
+            let room_limiter = ws_room_rate_limiter_for_ws.clone();
             tokio::spawn(async move {
-                if let Err(err) = handle_ws_connection(stream, peer, state, hub, rate_limiter).await {
+                if let Err(err) = handle_ws_connection(
+                    stream,
+                    peer,
+                    state,
+                    hub,
+                    auth_limiter,
+                    update_limiter,
+                    room_limiter,
+                    ws_auth_rate_limit,
+                    ws_auth_rate_window_secs,
+                    ws_update_rate_limit,
+                    ws_update_rate_window_secs,
+                )
+                .await
+                {
                     error!(%err, peer = %peer, "ws connection error");
                 }
             });
@@ -127,8 +166,26 @@ async fn main() -> Result<()> {
             let state = command_state.clone();
             let hub = ws_hub_for_cmd.clone();
             let rate_limiter = command_rate_limiter_for_cmd.clone();
+            let ws_update_rate_limiter = ws_update_rate_limiter_for_cmd.clone();
+            let ws_room_rate_limiter = ws_room_rate_limiter_for_cmd.clone();
             tokio::spawn(async move {
-                if let Err(err) = handle_command_connection(stream, peer, state, hub, rate_limiter).await {
+                if let Err(err) = handle_command_connection(
+                    stream,
+                    peer,
+                    state,
+                    hub,
+                    rate_limiter,
+                    ws_update_rate_limiter,
+                    ws_room_rate_limiter,
+                    ws_update_rate_limit,
+                    ws_update_rate_window_secs,
+                    ws_room_rate_limit,
+                    ws_room_rate_window_secs,
+                    cmd_rate_limit,
+                    cmd_rate_window_secs,
+                )
+                .await
+                {
                     error!(%err, peer = %peer, "command connection error");
                 }
             });
@@ -181,8 +238,15 @@ async fn main() -> Result<()> {
 }
 
 const MAX_COMMAND_LINE_LEN: usize = 8192;
-const CMD_RATE_LIMIT: usize = 120;
-const CMD_RATE_WINDOW_SECS: u64 = 60;
+
+const DEFAULT_CMD_RATE_LIMIT: usize = 120;
+const DEFAULT_CMD_RATE_WINDOW_SECS: u64 = 60;
+const DEFAULT_WS_AUTH_RATE_LIMIT: usize = 10;
+const DEFAULT_WS_AUTH_RATE_WINDOW_SECS: u64 = 60;
+const DEFAULT_WS_UPDATE_RATE_LIMIT: usize = 240;
+const DEFAULT_WS_UPDATE_RATE_WINDOW_SECS: u64 = 60;
+const DEFAULT_WS_ROOM_RATE_LIMIT: usize = 1000;
+const DEFAULT_WS_ROOM_RATE_WINDOW_SECS: u64 = 60;
 
 async fn read_line_with_limit<R>(reader: &mut BufReader<R>, line: &mut String) -> Result<usize>
 where
@@ -242,10 +306,18 @@ async fn handle_command_connection(
     state: SharedState,
     ws_hub: Arc<Mutex<WsHub>>,
     rate_limiter: Arc<RateLimiter>,
+    ws_update_rate_limiter: Arc<RateLimiter>,
+    ws_room_rate_limiter: Arc<RateLimiter>,
+    ws_update_rate_limit: usize,
+    ws_update_rate_window_secs: u64,
+    ws_room_rate_limit: usize,
+    ws_room_rate_window_secs: u64,
+    cmd_rate_limit: usize,
+    cmd_rate_window_secs: u64,
 ) -> Result<()> {
     let key = peer.ip().to_string();
     let allowed = rate_limiter
-        .allow(&key, CMD_RATE_LIMIT, std::time::Duration::from_secs(CMD_RATE_WINDOW_SECS))
+        .allow(&key, cmd_rate_limit, std::time::Duration::from_secs(cmd_rate_window_secs))
         .await;
     if !allowed {
         info!(%peer, "command rate limit exceeded");
@@ -304,15 +376,59 @@ async fn handle_command_connection(
             continue;
         }
 
+        {
+            let mut app = state.write().await;
+            app.total_command_requests = app.total_command_requests.saturating_add(1);
+        }
+
         let (resp, updates) = process_command(trimmed, &state).await;
+
+        if resp.starts_with("ERROR") {
+            let mut app = state.write().await;
+            app.command_error_count = app.command_error_count.saturating_add(1);
+        }
         writer.write_all(resp.as_bytes()).await?;
         writer.write_all(b"\n").await?;
         writer.flush().await?;
 
-        if !updates.is_empty() {
+        let mut room_deleted: Option<u64> = None;
+        if trimmed.starts_with("ROOM.DELETE") {
+            let parts: Vec<&str> = trimmed.split_whitespace().collect();
+            if parts.len() >= 2 {
+                if let Ok(id) = parts[1].parse::<u64>() {
+                    if resp == "OK" {
+                        room_deleted = Some(id);
+                    }
+                }
+            }
+        }
+
+        if let Some(room_id) = room_deleted {
             let mut hub = ws_hub.lock().await;
+            hub.remove_room(room_id);
+            info!(room_id, "ws hub cleanup on room delete");
+        }
+
+        if !updates.is_empty() {
             for update in updates {
-                hub.broadcast_update(update).await;
+                let room_key = format!("room:{}", update.room_id);
+                let room_allowed = ws_room_rate_limiter
+                    .allow(&room_key, ws_room_rate_limit, std::time::Duration::from_secs(ws_room_rate_window_secs))
+                    .await;
+
+                if !room_allowed {
+                    info!(room_id = update.room_id, "room-level ws update rate limit exceeded");
+                    continue;
+                }
+
+                let mut hub = ws_hub.lock().await;
+                hub.broadcast_update(
+                    update,
+                    &ws_update_rate_limiter,
+                    ws_update_rate_limit,
+                    ws_update_rate_window_secs,
+                )
+                .await;
             }
         }
     }

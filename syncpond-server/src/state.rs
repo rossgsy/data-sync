@@ -57,6 +57,15 @@ impl std::error::Error for StateError {}
 #[derive(Debug)]
 pub struct AppState {
     pub total_ws_connections: usize,
+    pub total_command_requests: u64,
+    pub command_error_count: u64,
+    pub ws_auth_success: u64,
+    pub ws_auth_failure: u64,
+    pub ws_connection_latency_ns_total: u128,
+    pub ws_connection_count: u64,
+    pub ws_update_dropped: u64,
+    pub ws_update_rate_limited: u64,
+    pub ws_send_errors: u64,
     pub rooms: HashMap<u64, Arc<StdRwLock<RoomState>>>,
     pub next_room_id: u64,
     pub jwt_key: Option<String>,
@@ -79,6 +88,15 @@ impl AppState {
             jwt_audience: None,
             last_jwt_issue_seconds: None,
             command_api_key: None,
+            total_command_requests: 0,
+            command_error_count: 0,
+            ws_auth_success: 0,
+            ws_auth_failure: 0,
+            ws_connection_latency_ns_total: 0,
+            ws_connection_count: 0,
+            ws_update_dropped: 0,
+            ws_update_rate_limited: 0,
+            ws_send_errors: 0,
         }
     }
 
@@ -210,6 +228,19 @@ impl AppState {
             "room_count": room_count,
             "ws_connections": ws_connections,
             "next_room_id": self.next_room_id,
+            "total_command_requests": self.total_command_requests,
+            "command_error_count": self.command_error_count,
+            "ws_auth_success": self.ws_auth_success,
+            "ws_auth_failure": self.ws_auth_failure,
+            "ws_connection_count": self.ws_connection_count,
+            "ws_connection_avg_latency_ms": if self.ws_connection_count > 0 {
+                (self.ws_connection_latency_ns_total as f64 / self.ws_connection_count as f64) / 1_000_000.0
+            } else {
+                0.0
+            },
+            "ws_update_rate_limited": self.ws_update_rate_limited,
+            "ws_update_dropped": self.ws_update_dropped,
+            "ws_send_errors": self.ws_send_errors,
         })
     }
 

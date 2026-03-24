@@ -403,6 +403,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_process_command_room_info_invalid_room_id() {
+        let state = sample_state();
+
+        let (resp, _) = process_command("ROOM.INFO foo", &state).await;
+        assert_eq!(resp, "ERROR invalid_room_id");
+    }
+
+    #[tokio::test]
+    async fn test_process_command_set_invalid_json() {
+        let state = sample_state();
+        process_command("ROOM.CREATE", &state).await;
+
+        let (resp, _) = process_command("SET 1 public foo {not-a-json}", &state).await;
+        assert!(resp.starts_with("ERROR invalid_json"));
+    }
+
+    #[tokio::test]
     async fn test_process_tx_sequence() {
         let state = sample_state();
         process_command("ROOM.CREATE", &state).await;

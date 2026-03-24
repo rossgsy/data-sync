@@ -22,20 +22,20 @@
 
 ## 4. WebSocket flow and room state
 
-- [ ] Fix `total_ws_connections` incrementing on successful `handle_ws_connection` auth (currently only decremented on close).
-- [ ] Add explicit cleanup of stale clients on room deletion (hub may keep entries for removed rooms until disconnect).
-- [ ] Add protection for large number of subscriptions or high-frequency broadcast; currently sends to all clients via unbounded channel, risking unbounded memory usage.
+- [x] Fix `total_ws_connections` incrementing on successful `handle_ws_connection` auth (currently only decremented on close).
+- [x] Add explicit cleanup of stale clients on room deletion (hub may keep entries for removed rooms until disconnect).
+- [x] Add protection for large number of subscriptions or high-frequency broadcast; currently sends to all clients via unbounded channel, risking unbounded memory usage.
 
 ## 5. Rate limiter and DoS defenses
 
-- [ ] Improve rate limiter to periodically evict stale keys (currently grows forever with new IPs).
-- [ ] Add per-client and per-room rate limit settings for WS updates and command actions.
+- [x] Improve rate limiter to periodically evict stale keys (currently grows forever with new IPs).
+- [x] Add per-client and per-room rate limit settings for WS updates and command actions.
 
 ## 6. Reliability and observable improvements
 
-- [ ] Add structured metrics, error counters, and request latency tracking (especially for long-lived WS operations).
-- [ ] Add more unit tests for edge cases: `ROOM.INFO` with invalid IDs, invalid JSON in `SET`, race with deleted room while WS clients connected.
-- [ ] Add integration tests exercising command server + ws client together.
+- [x] Add structured metrics, error counters, and request latency tracking (especially for long-lived WS operations).
+- [x] Add more unit tests for edge cases: `ROOM.INFO` with invalid IDs, invalid JSON in `SET`, race with deleted room while WS clients connected.
+- [x] Add integration tests exercising command server + ws client together.
 
 ## 7. Code quality and lint cleanup
 
