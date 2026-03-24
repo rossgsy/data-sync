@@ -3,7 +3,7 @@ use crate::state::{AppState, SharedState};
 use crate::commands::RoomUpdate;
 use anyhow::Result;
 use futures_util::{SinkExt, StreamExt};
-use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, Header, Validation};
+use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{collections::{HashMap, HashSet}, net::SocketAddr, sync::Arc, time::{Duration, Instant, SystemTime, UNIX_EPOCH}};
@@ -12,6 +12,7 @@ use tokio::{
     sync::{mpsc, Mutex},
 };
 use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
 use tracing::{error, info};
 use uuid::Uuid;
 
@@ -189,6 +190,18 @@ fn validate_jwt_claims(app: &AppState, token: &str) -> Result<Claims, String> {
         return Err("expired_jwt".to_string());
     }
 
+    if claims.room.trim().is_empty() {
+        return Err("invalid_jwt_room".to_string());
+    }
+
+    if claims.sub != format!("room:{}", claims.room) {
+        return Err("invalid_jwt_sub".to_string());
+    }
+
+    if claims.room.parse::<u64>().is_err() {
+        return Err("invalid_jwt_room".to_string());
+    }
+
     Ok(claims)
 }
 
@@ -205,6 +218,7 @@ pub async fn handle_ws_connection(
     ws_auth_rate_window_secs: u64,
     _ws_update_rate_limit: usize,
     _ws_update_rate_window_secs: u64,
+    ws_allowed_origins: Vec<String>,
 ) -> Result<()> {
     let key = peer.ip().to_string();
     let allowed = auth_rate_limiter
@@ -216,7 +230,35 @@ pub async fn handle_ws_connection(
     }
 
     let connection_start = Instant::now();
-    let ws_stream = tokio_tungstenite::accept_async(stream).await?;
+    let ws_stream = if !ws_allowed_origins.is_empty() {
+        let origins = ws_allowed_origins.clone();
+        tokio_tungstenite::accept_hdr_async(stream, move |req: &Request, response: Response| {
+            let origin = req
+                .headers()
+                .get("origin")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string());
+
+            if let Some(origin) = origin {
+                if origins.iter().any(|allowed| allowed == &origin) {
+                    Ok(response)
+                } else {
+                    Err(Response::builder()
+                        .status(403)
+                        .body(Some(format!("origin_not_allowed: {}", origin)))
+                        .unwrap())
+                }
+            } else {
+                Err(Response::builder()
+                    .status(400)
+                    .body(Some("missing_origin".to_string()))
+                    .unwrap())
+            }
+        })
+        .await?
+    } else {
+        tokio_tungstenite::accept_async(stream).await?
+    };
     info!(%peer, "websocket connection established");
 
     let (mut ws_sender, mut ws_receiver) = ws_stream.split();
@@ -413,7 +455,7 @@ mod tests {
     #[tokio::test]
     async fn test_validate_jwt_claims_success() {
         let mut app = AppState::new();
-        app.set_jwt_key("secret".to_string());
+        app.set_jwt_key("secretsecretsecretsecretsecretsecret".to_string());
         app.set_jwt_issuer("my-issuer".to_string());
         app.set_jwt_audience("my-aud".to_string());
 
@@ -427,7 +469,7 @@ mod tests {
     #[tokio::test]
     async fn test_validate_jwt_claims_expired() {
         let mut app = AppState::new();
-        app.set_jwt_key("secret".to_string());
+        app.set_jwt_key("secretsecretsecretsecretsecretsecret".to_string());
 
         let past = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() - 3600;
 
@@ -454,7 +496,7 @@ mod tests {
     #[tokio::test]
     async fn test_validate_jwt_claims_missing_exp() {
         let mut app = AppState::new();
-        app.set_jwt_key("secret".to_string());
+        app.set_jwt_key("secretsecretsecretsecretsecretsecret".to_string());
 
         let claims = IncompleteClaims {
             sub: "room:1".into(),
@@ -465,6 +507,39 @@ mod tests {
         let token = encode(&Header::default(), &claims, &jsonwebtoken::EncodingKey::from_secret("secret".as_ref())).unwrap();
         let err = validate_jwt_claims(&app, &token).unwrap_err();
         assert!(err.contains("invalid_jwt"));
+    }
+
+    #[tokio::test]
+    async fn test_validate_jwt_claims_sub_mismatch() {
+        let mut app = AppState::new();
+        app.set_jwt_key("secretsecretsecretsecretsecretsecret".to_string());
+        app.set_jwt_issuer("my-issuer".to_string());
+        app.set_jwt_audience("my-aud".to_string());
+
+        let room_id = app.create_room();
+
+        #[derive(Debug, Serialize)]
+        struct BadClaims {
+            sub: String,
+            room: String,
+            containers: Vec<String>,
+            exp: usize,
+            iss: Option<String>,
+            aud: Option<String>,
+        }
+
+        let claims = BadClaims {
+            sub: format!("room:{}-bad", room_id),
+            room: room_id.to_string(),
+            containers: vec!["public".into()],
+            exp: (SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() + 3600) as usize,
+            iss: Some("my-issuer".to_string()),
+            aud: Some("my-aud".to_string()),
+        };
+
+        let token = encode(&Header::default(), &claims, &jsonwebtoken::EncodingKey::from_secret(app.jwt_key.as_ref().unwrap().as_ref())).unwrap();
+        let err = validate_jwt_claims(&app, &token).unwrap_err();
+        assert_eq!(err, "invalid_jwt_sub");
     }
 
     #[tokio::test]

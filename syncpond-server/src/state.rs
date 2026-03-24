@@ -51,6 +51,9 @@ pub enum StateError {
 
     /// JWT issuer/audience is not configured.
     JwtIssuerAudienceNotConfigured,
+
+    /// JWT key is too weak.
+    JwtKeyTooShort,
 }
 
 impl std::fmt::Display for StateError {
@@ -64,6 +67,7 @@ impl std::fmt::Display for StateError {
             StateError::TxAlreadyOpen => write!(f, "tx_already_open"),
             StateError::JwtKeyNotConfigured => write!(f, "jwt_key_not_configured"),
             StateError::JwtIssuerAudienceNotConfigured => write!(f, "jwt_issuer_audience_not_configured"),
+            StateError::JwtKeyTooShort => write!(f, "jwt_key_too_short"),
         }
     }
 }
@@ -310,6 +314,9 @@ impl AppState {
     /// Generate a JWT for a room with granted containers.
     pub fn create_room_token(&self, room_id: u64, containers: &[String]) -> Result<String, StateError> {
         let key = self.jwt_key.as_ref().ok_or(StateError::JwtKeyNotConfigured)?;
+        if key.len() < 32 {
+            return Err(StateError::JwtKeyTooShort);
+        }
 
         let _issuer = self
             .jwt_issuer
@@ -553,6 +560,18 @@ mod tests {
         let room_id = app.create_room();
         assert!(app.delete_room(room_id).is_ok());
         assert!(matches!(app.delete_room(room_id), Err(StateError::RoomNotFound)));
+    }
+
+    #[test]
+    fn test_create_room_token_jwt_key_too_short() {
+        let mut app = AppState::new();
+        app.set_jwt_key("short".to_string());
+        app.set_jwt_issuer("issuer".to_string());
+        app.set_jwt_audience("audience".to_string());
+
+        let room_id = app.create_room();
+        let err = app.create_room_token(room_id, &["public".to_string()]).unwrap_err();
+        assert!(matches!(err, StateError::JwtKeyTooShort));
     }
 }
 

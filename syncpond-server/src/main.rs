@@ -12,7 +12,7 @@ use crate::state::{AppState, SharedState};
 use crate::ws::{handle_ws_connection, WsHub};
 use anyhow::{Context, Result};
 use serde::Deserialize;
-use std::{fs, net::SocketAddr, sync::Arc};
+use std::{fs, net::SocketAddr, sync::Arc, time::Duration};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter},
     net::{TcpListener, TcpStream},
@@ -41,6 +41,9 @@ struct SyncpondConfig {
     ws_update_rate_window_secs: Option<u64>,
     ws_room_rate_limit: Option<usize>,
     ws_room_rate_window_secs: Option<u64>,
+    ws_allowed_origins: Option<Vec<String>>,
+    command_auth_rate_limit: Option<usize>,
+    command_auth_rate_window_secs: Option<u64>,
 }
 
 #[tokio::main]
@@ -72,6 +75,7 @@ async fn main() -> Result<()> {
     let ws_update_rate_limiter = Arc::new(RateLimiter::new());
     let ws_room_rate_limiter = Arc::new(RateLimiter::new());
     let command_rate_limiter = Arc::new(RateLimiter::new());
+    let command_auth_rate_limiter = Arc::new(RateLimiter::new());
 
     let ws_update_rate_limiter_for_ws = ws_update_rate_limiter.clone();
     let ws_update_rate_limiter_for_cmd = ws_update_rate_limiter.clone();
@@ -86,6 +90,17 @@ async fn main() -> Result<()> {
     let ws_update_rate_window_secs = config.ws_update_rate_window_secs.unwrap_or(DEFAULT_WS_UPDATE_RATE_WINDOW_SECS);
     let ws_room_rate_limit = config.ws_room_rate_limit.unwrap_or(DEFAULT_WS_ROOM_RATE_LIMIT);
     let ws_room_rate_window_secs = config.ws_room_rate_window_secs.unwrap_or(DEFAULT_WS_ROOM_RATE_WINDOW_SECS);
+    let ws_allowed_origins = config
+        .ws_allowed_origins
+        .clone()
+        .unwrap_or_else(|| DEFAULT_WS_ALLOWED_ORIGINS.iter().map(|s| s.to_string()).collect());
+
+    let command_auth_rate_limit = config
+        .command_auth_rate_limit
+        .unwrap_or(DEFAULT_COMMAND_AUTH_RATE_LIMIT);
+    let command_auth_rate_window_secs = config
+        .command_auth_rate_window_secs
+        .unwrap_or(DEFAULT_COMMAND_AUTH_RATE_WINDOW_SECS);
 
     if config.command_api_key.trim().is_empty() {
         anyhow::bail!("command_api_key must be configured and non-empty");
@@ -120,6 +135,7 @@ async fn main() -> Result<()> {
     let command_state = shared_state.clone();
     let ws_hub_for_cmd = ws_hub.clone();
     let command_rate_limiter_for_cmd = command_rate_limiter.clone();
+    let command_auth_rate_limiter_for_cmd = command_auth_rate_limiter.clone();
 
     let ws_addr_for_task = ws_addr.clone();
     let command_addr_for_task = command_addr.clone();
@@ -135,6 +151,7 @@ async fn main() -> Result<()> {
             let auth_limiter = ws_auth_rate_limiter.clone();
             let update_limiter = ws_update_rate_limiter_for_ws.clone();
             let room_limiter = ws_room_rate_limiter_for_ws.clone();
+            let ws_allowed_origins_for_conn = ws_allowed_origins.clone();
             tokio::spawn(async move {
                 if let Err(err) = handle_ws_connection(
                     stream,
@@ -148,6 +165,7 @@ async fn main() -> Result<()> {
                     ws_auth_rate_window_secs,
                     ws_update_rate_limit,
                     ws_update_rate_window_secs,
+                    ws_allowed_origins_for_conn,
                 )
                 .await
                 {
@@ -171,6 +189,7 @@ async fn main() -> Result<()> {
             let rate_limiter = command_rate_limiter_for_cmd.clone();
             let ws_update_rate_limiter = ws_update_rate_limiter_for_cmd.clone();
             let ws_room_rate_limiter = ws_room_rate_limiter_for_cmd.clone();
+            let command_auth_rate_limiter_for_conn = command_auth_rate_limiter_for_cmd.clone();
             tokio::spawn(async move {
                 if let Err(err) = handle_command_connection(
                     stream,
@@ -178,6 +197,7 @@ async fn main() -> Result<()> {
                     state,
                     hub,
                     rate_limiter,
+                    command_auth_rate_limiter_for_conn,
                     ws_update_rate_limiter,
                     ws_room_rate_limiter,
                     ws_update_rate_limit,
@@ -186,6 +206,8 @@ async fn main() -> Result<()> {
                     ws_room_rate_window_secs,
                     cmd_rate_limit,
                     cmd_rate_window_secs,
+                    command_auth_rate_limit,
+                    command_auth_rate_window_secs,
                 )
                 .await
                 {
@@ -250,6 +272,21 @@ const DEFAULT_WS_UPDATE_RATE_LIMIT: usize = 240;
 const DEFAULT_WS_UPDATE_RATE_WINDOW_SECS: u64 = 60;
 const DEFAULT_WS_ROOM_RATE_LIMIT: usize = 1000;
 const DEFAULT_WS_ROOM_RATE_WINDOW_SECS: u64 = 60;
+const DEFAULT_WS_ALLOWED_ORIGINS: &[&str] = &[];
+const DEFAULT_COMMAND_AUTH_RATE_LIMIT: usize = 5;
+const DEFAULT_COMMAND_AUTH_RATE_WINDOW_SECS: u64 = 60;
+
+fn constant_time_eq(a: &str, b: &str) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+
+    let mut diff = 0u8;
+    for (x, y) in a.bytes().zip(b.bytes()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
 
 async fn read_line_with_limit<R>(reader: &mut BufReader<R>, line: &mut String) -> Result<usize>
 where
@@ -309,6 +346,7 @@ async fn handle_command_connection(
     state: SharedState,
     ws_hub: Arc<Mutex<WsHub>>,
     rate_limiter: Arc<RateLimiter>,
+    command_auth_rate_limiter: Arc<RateLimiter>,
     ws_update_rate_limiter: Arc<RateLimiter>,
     ws_room_rate_limiter: Arc<RateLimiter>,
     ws_update_rate_limit: usize,
@@ -317,13 +355,23 @@ async fn handle_command_connection(
     ws_room_rate_window_secs: u64,
     cmd_rate_limit: usize,
     cmd_rate_window_secs: u64,
+    command_auth_rate_limit: usize,
+    command_auth_rate_window_secs: u64,
 ) -> Result<()> {
     let key = peer.ip().to_string();
     let allowed = rate_limiter
-        .allow(&key, cmd_rate_limit, std::time::Duration::from_secs(cmd_rate_window_secs))
+        .allow(&key, cmd_rate_limit, Duration::from_secs(cmd_rate_window_secs))
         .await;
     if !allowed {
         info!(%peer, "command rate limit exceeded");
+        return Ok(());
+    }
+
+    let auth_allowed = command_auth_rate_limiter
+        .allow(&key, command_auth_rate_limit, Duration::from_secs(command_auth_rate_window_secs))
+        .await;
+    if !auth_allowed {
+        info!(%peer, "command auth rate limit exceeded");
         return Ok(());
     }
 
@@ -348,7 +396,7 @@ async fn handle_command_connection(
     };
 
     if let Some(expected_key) = expected_key {
-        if provided_key != expected_key {
+        if !constant_time_eq(provided_key, &expected_key) {
             writer.write_all(b"ERROR invalid_api_key\n").await?;
             writer.flush().await?;
             return Ok(());
