@@ -17,9 +17,9 @@ use crate::state::{AppState, SharedState};
 use crate::ws::{handle_ws_connection, WsHub};
 use anyhow::{Context, Result};
 use serde::Deserialize;
-use std::{fs, net::SocketAddr, sync::Arc, time::Duration};
+use std::{fs, net::SocketAddr, path::Path, sync::Arc, time::Duration};
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter},
+    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, BufWriter},
     net::{TcpListener, TcpStream},
     sync::{Mutex, RwLock},
 };
@@ -160,7 +160,7 @@ async fn main() -> Result<()> {
             let room_limiter = ws_room_rate_limiter_for_ws.clone();
             let ws_allowed_origins_for_conn = ws_allowed_origins.clone();
             tokio::spawn(async move {
-                if let Err(err) = handle_ws_connection(
+                if let Err(err) = handle_ws_or_docs_connection(
                     stream,
                     peer,
                     state,
@@ -176,7 +176,7 @@ async fn main() -> Result<()> {
                 )
                 .await
                 {
-                    error!(%err, peer = %peer, "ws connection error");
+                    error!(%err, peer = %peer, "ws/http connection error");
                 }
             });
         }
@@ -345,6 +345,134 @@ async fn handle_health_connection(
     writer.write_all(response.as_bytes()).await?;
     writer.flush().await?;
     Ok(())
+}
+
+fn html_escape(input: &str) -> String {
+    input
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
+fn make_doc_index_html() -> String {
+    let mut html = String::from("<html><head><title>syncpond docs</title></head><body><h1>syncpond docs</h1><ul>");
+    if let Ok(entries) = fs::read_dir("doc") {
+        for entry in entries.flatten() {
+            if let Ok(file_type) = entry.file_type() {
+                if file_type.is_file() {
+                    if let Some(name) = entry.file_name().to_str() {
+                        let escaped = html_escape(name);
+                        html.push_str(&format!(
+                            "<li><a href=\"/docs/{}\">{}</a></li>",
+                            escaped, escaped
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    html.push_str("</ul></body></html>");
+    html
+}
+
+async fn serve_docs_connection(mut stream: TcpStream, request: &str) -> Result<()> {
+    let mut lines = request.lines();
+    let request_line = lines.next().unwrap_or("");
+    let parts: Vec<&str> = request_line.split_whitespace().collect();
+    let path = if parts.len() >= 2 { parts[1] } else { "/" };
+
+    let (status, content_type, body) = if path == "/" {
+        ("200 OK", "text/html; charset=utf-8", make_doc_index_html())
+    } else if path == "/docs" || path == "/docs/" {
+        ("200 OK", "text/html; charset=utf-8", make_doc_index_html())
+    } else if let Some(stripped) = path.strip_prefix("/docs/") {
+        let file_path = Path::new("doc").join(stripped);
+        if file_path.is_file() {
+            let content = fs::read_to_string(&file_path).unwrap_or_else(|_| "".to_string());
+            let content_type = if file_path.extension().and_then(|e| e.to_str()) == Some("md") {
+                "text/markdown; charset=utf-8"
+            } else {
+                "text/plain; charset=utf-8"
+            };
+            ("200 OK", content_type, content)
+        } else if file_path.is_dir() {
+            // Directory listing for nested paths.
+            let mut html = format!("<html><head><title>{}</title></head><body><h1>Index of {}</h1><ul>", path, path);
+            if let Ok(entries) = fs::read_dir(&file_path) {
+                for entry in entries.flatten() {
+                    if let Some(name) = entry.file_name().to_str() {
+                        let escaped = html_escape(name);
+                        html.push_str(&format!("<li><a href=\"{}/{}\">{}</a></li>", path.trim_end_matches('/'), escaped, escaped));
+                    }
+                }
+            }
+            html.push_str("</ul></body></html>");
+            ("200 OK", "text/html; charset=utf-8", html)
+        } else {
+            ("404 Not Found", "text/plain; charset=utf-8", "not found".to_string())
+        }
+    } else {
+        ("404 Not Found", "text/plain; charset=utf-8", "not found".to_string())
+    };
+
+    let response = format!(
+        "HTTP/1.1 {}\r\ncontent-type: {}\r\ncontent-length: {}\r\n\r\n{}",
+        status,
+        content_type,
+        body.len(),
+        body
+    );
+    stream.write_all(response.as_bytes()).await?;
+    stream.flush().await?;
+    Ok(())
+}
+
+async fn handle_ws_or_docs_connection(
+    buf_stream: TcpStream,
+    peer: SocketAddr,
+    state: SharedState,
+    ws_hub: Arc<Mutex<WsHub>>,
+    auth_rate_limiter: Arc<RateLimiter>,
+    ws_update_rate_limiter: Arc<RateLimiter>,
+    ws_room_rate_limiter: Arc<RateLimiter>,
+    ws_auth_rate_limit: usize,
+    ws_auth_rate_window_secs: u64,
+    ws_update_rate_limit: usize,
+    ws_update_rate_window_secs: u64,
+    ws_allowed_origins: Vec<String>,
+) -> Result<()> {
+    let mut peek_buf = [0u8; 16384];
+    let n = buf_stream.peek(&mut peek_buf).await?;
+    if n == 0 {
+        return Ok(());
+    }
+
+    let req_text = String::from_utf8_lossy(&peek_buf[..n]);
+    let is_http_get = req_text.starts_with("GET ");
+    let is_ws_upgrade = req_text.to_lowercase().contains("upgrade: websocket");
+
+    if is_http_get && !is_ws_upgrade {
+        return serve_docs_connection(buf_stream, &req_text).await;
+    }
+
+    // from here on, assume WebSocket connection.
+    handle_ws_connection(
+        buf_stream,
+        peer,
+        state,
+        ws_hub,
+        auth_rate_limiter,
+        ws_update_rate_limiter,
+        ws_room_rate_limiter,
+        ws_auth_rate_limit,
+        ws_auth_rate_window_secs,
+        ws_update_rate_limit,
+        ws_update_rate_window_secs,
+        ws_allowed_origins,
+    )
+    .await
 }
 
 async fn handle_command_connection(
