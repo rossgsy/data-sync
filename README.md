@@ -73,3 +73,19 @@ Updates are broadcast as events in JSON, including container/key/value semantics
 - health endpoint loopback by default
 - unbounded WS updates protected by per-client and per-room rate limiting
 - command parser checks max command line length to prevent large payload DoS
+
+## Docker image build and deploy
+
+A convenience script is available to build and deploy the server image to Docker Hub under `paleglyph/syncpond`.
+
+```bash
+# default: image name paleglyph/syncpond and tag from git describe (or latest)
+./scripts/build-and-push-syncpond-server.sh
+
+# explicit image name + tag
+./scripts/build-and-push-syncpond-server.sh --image-name paleglyph/syncpond --tag v1.0.0
+
+# build only without pushing
+./scripts/build-and-push-syncpond-server.sh --no-push
+```
+
