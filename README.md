@@ -89,3 +89,66 @@ A convenience script is available to build and deploy the server image to Docker
 ./scripts/build-and-push-syncpond-server.sh --no-push
 ```
 
+## Docker Compose example (with secrets and env)
+
+Create a `.env` file at repo root:
+
+```env
+SYNCPOND_CONFIG=/etc/syncpond/config.yaml
+# ensure command api key is protected and not in version control
+COMMAND_API_KEY=supersecretcommandkey
+JWT_KEY=supersecretjwtkey
+```
+
+Create a `config.yaml` on disk for the container (or use Docker secrets with target path `/etc/syncpond/config.yaml`):
+
+```yaml
+command_api_key: "${COMMAND_API_KEY}"
+ws_addr: "0.0.0.0:8080"
+command_addr: "0.0.0.0:9090"
+health_addr: "0.0.0.0:7070"
+jwt_key: "${JWT_KEY}"
+jwt_ttl_seconds: 3600
+require_tls: false
+health_bind_loopback_only: false
+```
+
+Add:
+
+```yaml
+version: '3.8'
+services:
+  syncpond-server:
+    image: paleglyph/syncpond:latest
+    build:
+      context: ./syncpond-server
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"   # websocket api
+      - "9090:9090"   # command api
+      - "7070:7070"   # health
+    env_file: .env
+    environment:
+      SYNCPOND_CONFIG: /etc/syncpond/config.yaml
+    volumes:
+      - ./config.yaml:/etc/syncpond/config.yaml:ro
+    restart: unless-stopped
+
+  # optional reverse proxy (example nginx): provide TLS and public domain routing
+  # nginx:
+  #   image: nginx:stable
+  #   ports:
+  #     - "80:80"
+  #     - "443:443"
+  #   volumes:
+  #     - ./nginx.conf:/etc/nginx/nginx.conf:ro
+
+# Use Docker secrets in prod via secrets: with `command_api_key` and `jwt_key` as secure files.
+```
+
+Notes:
+
+- `command_api_key` is sensitive: keep it out of Git and use Docker secrets for production.
+- `ws_addr`, `command_addr`, `health_addr` are exposed on container; in prod, use proxying and firewall rules.
+- `require_tls` remains false here since TLS should be handled by external proxy.
+

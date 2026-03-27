@@ -16,10 +16,11 @@ use crate::rate_limiter::RateLimiter;
 use crate::state::{AppState, SharedState};
 use crate::ws::{handle_ws_connection, WsHub};
 use anyhow::{Context, Result};
+use include_dir::{include_dir, Dir};
 use serde::Deserialize;
 use std::{fs, net::SocketAddr, path::Path, sync::Arc, time::Duration};
 use tokio::{
-    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, BufWriter},
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter},
     net::{TcpListener, TcpStream},
     sync::{Mutex, RwLock},
 };
@@ -347,6 +348,8 @@ async fn handle_health_connection(
     Ok(())
 }
 
+static DOC_DIR: Dir = include_dir!("doc");
+
 fn html_escape(input: &str) -> String {
     input
         .replace('&', "&amp;")
@@ -358,18 +361,13 @@ fn html_escape(input: &str) -> String {
 
 fn make_doc_index_html() -> String {
     let mut html = String::from("<html><head><title>syncpond docs</title></head><body><h1>syncpond docs</h1><ul>");
-    if let Ok(entries) = fs::read_dir("doc") {
-        for entry in entries.flatten() {
-            if let Ok(file_type) = entry.file_type() {
-                if file_type.is_file() {
-                    if let Some(name) = entry.file_name().to_str() {
-                        let escaped = html_escape(name);
-                        html.push_str(&format!(
-                            "<li><a href=\"/docs/{}\">{}</a></li>",
-                            escaped, escaped
-                        ));
-                    }
-                }
+    for entry in DOC_DIR.entries() {
+        if let Some(path) = entry.path().to_str() {
+            let escaped = html_escape(path);
+            if entry.as_dir().is_some() {
+                html.push_str(&format!("<li><a href=\"/docs/{}\">{}/</a></li>", escaped, escaped));
+            } else if entry.as_file().is_some() {
+                html.push_str(&format!("<li><a href=\"/docs/{}\">{}</a></li>", escaped, escaped));
             }
         }
     }
@@ -383,29 +381,25 @@ async fn serve_docs_connection(mut stream: TcpStream, request: &str) -> Result<(
     let parts: Vec<&str> = request_line.split_whitespace().collect();
     let path = if parts.len() >= 2 { parts[1] } else { "/" };
 
-    let (status, content_type, body) = if path == "/" {
-        ("200 OK", "text/html; charset=utf-8", make_doc_index_html())
-    } else if path == "/docs" || path == "/docs/" {
+    let (status, content_type, body) = if path == "/" || path == "/docs" || path == "/docs/" {
         ("200 OK", "text/html; charset=utf-8", make_doc_index_html())
     } else if let Some(stripped) = path.strip_prefix("/docs/") {
-        let file_path = Path::new("doc").join(stripped);
-        if file_path.is_file() {
-            let content = fs::read_to_string(&file_path).unwrap_or_else(|_| "".to_string());
-            let content_type = if file_path.extension().and_then(|e| e.to_str()) == Some("md") {
+        if let Some(file) = DOC_DIR.get_file(stripped) {
+            let content = file.contents_utf8().unwrap_or_default().to_string();
+            let content_type = if Path::new(stripped).extension().and_then(|e| e.to_str()) == Some("md") {
                 "text/markdown; charset=utf-8"
             } else {
                 "text/plain; charset=utf-8"
             };
             ("200 OK", content_type, content)
-        } else if file_path.is_dir() {
-            // Directory listing for nested paths.
+        } else if let Some(dir) = DOC_DIR.get_dir(stripped) {
             let mut html = format!("<html><head><title>{}</title></head><body><h1>Index of {}</h1><ul>", path, path);
-            if let Ok(entries) = fs::read_dir(&file_path) {
-                for entry in entries.flatten() {
-                    if let Some(name) = entry.file_name().to_str() {
-                        let escaped = html_escape(name);
-                        html.push_str(&format!("<li><a href=\"{}/{}\">{}</a></li>", path.trim_end_matches('/'), escaped, escaped));
-                    }
+            for entry in dir.entries() {
+                if let Some(name) = entry.path().file_name().and_then(|n| n.to_str()) {
+                    let escaped = html_escape(name);
+                    let href = format!("{}/{}", path.trim_end_matches('/'), escaped);
+                    let label = if entry.as_dir().is_some() { format!("{}/", escaped) } else { escaped.clone() };
+                    html.push_str(&format!("<li><a href=\"{}\">{}</a></li>", href, label));
                 }
             }
             html.push_str("</ul></body></html>");

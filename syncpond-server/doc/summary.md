@@ -17,8 +17,8 @@ Key capabilities:
 
 Deployment:
 
-- Dockerfile at `syncpond-server/Dockerfile`
+- Built and packed Docker image at `syncpond-server/Dockerfile`
 - `docker-compose.yml` sample environment
 - Build script: `scripts/build-and-push-syncpond-server.sh` (pushes to `paleglyph/syncpond`)
 
-This repository is designed for local development, experimentations, and as a foundation for production-grade sync services with external persistence and TLS fronting.  
+This repository is designed for local development, experimentations, and as a foundation for production-grade sync services with external persistence and TLS fronting.

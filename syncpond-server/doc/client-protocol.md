@@ -41,9 +41,3 @@ This document describes the syncpond client protocol used by WebSocket clients a
 ## Note
 - TLS termination and authentication are expected to be enforced by reverse proxy in production.
 - `command_api_key` is mandatory and privileged. Keep this secret.
-- The API is intended to remain backward-compatible for client protocol extensions.
-- New update event fields should be optional; clients should ignore unknown fields.
-
-## Note
-- TLS termination and authentication are expected to be enforced by reverse proxy in production.
-- `command_api_key` is mandatory and privileged. Keep this secret.
