@@ -1,5 +1,5 @@
 {
-  "name": "@syncpond/client",
+  "name": "@paleglyph/syncpond-client",
   "version": "0.1.0",
   "description": "TypeScript shared client for Syncpond realtime sync server",
   "main": "dist/index.js",
