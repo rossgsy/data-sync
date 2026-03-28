@@ -149,14 +149,6 @@ export class SyncpondClient {
     this.ws.send(JSON.stringify(msg));
   }
 
-  send(message: object): void {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
-      throw new Error("WebSocket is not open.");
-    }
-
-    this.ws.send(JSON.stringify(message));
-  }
-
   private parseMessage(data: string): SyncpondServerMessage | null {
     try {
       return JSON.parse(data) as SyncpondServerMessage;
